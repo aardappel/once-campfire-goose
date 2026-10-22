@@ -5,6 +5,12 @@ target and complete header bytes, followed by the plain and gzip bodies. Compari
 request slices directly avoids allocating a formatted key on a hit. Different headers may
 cause extra misses; they cannot accidentally select another request's cached response.
 
+Cached pages use gzip level 6. For the measured room, this produces 20,877 bytes instead of
+level 1's 28,522. A ten-iteration encoding probe measured approximately 0.82 ms versus
+0.67 ms per encoding; these are isolated encoder timings, not whole-page latency. Level 9
+saved only another 928 bytes while taking approximately 1.59 ms. Message POST compression
+uses the existing HTTP compression path.
+
 The ordinary path opens a SQLite read transaction, reads `PRAGMA data_version`, and performs
 authentication, authorization and rendering against that snapshot. A changed version clears
 both page and authentication caches. Mutating HTTP requests clear the worker cache as well.

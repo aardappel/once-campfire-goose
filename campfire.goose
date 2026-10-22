@@ -33,6 +33,7 @@ struct Settings {
     storage: u8[..1024] = "storage",
     cache_enabled: bool = true,
     cache_diagnostics: bool = false,
+    epoll: bool = true,
 }
 
 var settings = Settings { .. };
@@ -261,6 +262,11 @@ fn request(db: sqlite::Db, writer: const campfire::WriterStatements&, version: s
     } else {campfire_cache_confirm(db.id);}
 }
 
+fn serve_app<S,H>(cfg: http::Config, fresh: S) -> http::Error {
+    if settings.epoll {return http::serve_epoll(cfg,fresh,H);}
+    return http::serve(cfg,fresh,H);
+}
+
 thread_fn worker(cfg: http::Config) {
     var db = sqlite::Db {};
     var version = sqlite::Stmt {};
@@ -280,7 +286,7 @@ thread_fn worker(cfg: http::Config) {
     var entries: campfire::CachedPage[128] = [campfire::CachedPage { .. }; 128];
     var bytes: u8[>..] = [];
     var state = campfire::CacheState { enabled: settings.cache_enabled, diagnostics: settings.cache_diagnostics, .. };
-    let e = http::serve(cfg, Exchange { .. }) { ev, exchange, out =>
+    let e = serve_app(cfg, Exchange { .. }) { ev, exchange, out =>
         if ev.kind == http::REQUEST && http::path_of(ev.req.target) == "/cable" {
             campfire::clear_cache(state);
             exchange.user = authenticate(db,ev.req,settings.cookie_key,state);
@@ -386,6 +392,11 @@ fn main() {
     if env("CAMPFIRE_CACHE", cache_text) { settings.cache_enabled = cache_text != "0"; }
     var diagnostics: u8[>..] = [];
     if env("CAMPFIRE_CACHE_DIAGNOSTICS", diagnostics) { settings.cache_diagnostics = diagnostics == "1"; }
+    var backend: u8[>..]=[];
+    if env("CAMPFIRE_HTTP_BACKEND",backend) {
+        guard backend=="epoll" || backend=="auto" else {abort("CAMPFIRE_HTTP_BACKEND must be epoll or auto");}
+        settings.epoll=backend=="epoll";
+    }
     var profiling: u8[>..]=[];
     campfire_profile_enable(env("CAMPFIRE_PROFILE_WRITES",profiling) && profiling=="1");
     var cfg = http::Config { address: "0.0.0.0", port: 3000, workers: 4, max_conns: 1024,

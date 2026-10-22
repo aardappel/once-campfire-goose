@@ -87,6 +87,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--apps", default="goose,rust,jai")
     parser.add_argument("--goose-image", default="once-campfire-goose:app")
+    parser.add_argument("--goose-backend", choices=("auto", "epoll"), help="override the Goose image's event loop")
     parser.add_argument("--rust-image", default="ghcr.io/basecamp/once-campfire-rust:main")
     parser.add_argument("--jai-image", default="ghcr.io/lucasmeijer/once-campfire-jai:2ecd487")
     parser.add_argument("--rounds", type=int, default=3)
@@ -150,6 +151,7 @@ def main():
         "platform": platform.platform(), "cpu_model": next(line.split(":", 1)[1].strip() for line in Path("/proc/cpuinfo").read_text().splitlines() if line.startswith("model name")),
         "duration_seconds": args.duration, "clients": args.clients, "rounds": args.rounds,
         "profile_writes": args.profile_writes, "profiles": profiles, "read_routes": selected, "mixed_write_rate": 10, "gzip": True, "preflight_only": args.preflight_only,
+        "goose_backend": args.goose_backend or "image default",
         "validator_sha256": checksum(verification / "loadgen/src/validation.rs"),
         "contracts_sha256": checksum(verification / "bench/contracts.rb"),
         "write_audit_sha256": checksum(verification / "bench/validate_acks.rb"),
@@ -191,6 +193,8 @@ def main():
                                   PORT=str(port), DATABASE_PATH="/rails/storage/db/production.sqlite3",
                                   STORAGE_PATH="/rails/storage/files", CAMPFIRE_CACHE="1", CAMPFIRE_CACHE_DIAGNOSTICS="0",
                                   CAMPFIRE_RESPONSE_CACHE_MB="64", CAMPFIRE_PROFILE_WRITES="1" if args.profile_writes else "0")
+                    if app=="goose" and args.goose_backend:
+                        config["CAMPFIRE_HTTP_BACKEND"]=args.goose_backend
                     env_file = data / "server.env"
                     env_file.write_text("".join(f"{key}={value}\n" for key, value in config.items()))
                     os.chmod(env_file, 0o600)

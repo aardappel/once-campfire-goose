@@ -104,7 +104,7 @@ fn cache_page(entries: CachedPage[:], bytes: u8[>..]&, state: CacheState&,
     }
     var packed: u8[>..] = [];
     if body.len >= 1024 {
-        var encoder = compress::encoder(compress::GZIP, 1);
+        var encoder = compress::encoder(compress::GZIP, 6);
         compress::write(encoder, body, packed);
         compress::finish(encoder, packed);
     }
