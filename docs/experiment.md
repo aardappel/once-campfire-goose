@@ -1,5 +1,10 @@
 # Campfire in Goose: experimental prototype
 
+This is the historical log from the compiler-repository experiment. Paths, dependency
+versions and statements about missing browser features below describe that earlier work.
+The standalone repository's [README](../README.md) and [browser coverage](browser-parity.md)
+describe the current implementation.
+
 This is a partial Campfire implementation on `codex/campfire-experiment`.
 The experiment is rebased onto `master` at `d9573d81`, which fixes the
 HTTP-package compiler regression. Goose, Rust and the published Jai image now

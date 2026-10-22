@@ -9,3 +9,7 @@ Goose and the Goose HTTP/hash/compression/SQLite packages are fetched separately
 revisions in `dependencies.json`; their original license files remain in their checkouts.
 SQLite is prepared with FTS5 enabled and the WAL observation shim in `sqlite_wal.c` appended.
 `prepare.py` accepts only the pinned original files or that exact patch.
+
+The Linux image uses libqrencode (LGPL-2.1-or-later) to encode session-transfer
+URLs. Its Debian package installs its copyright and license notices under
+`/usr/share/doc/libqrencode4/`; the Goose application renders the resulting matrix as SVG.

@@ -13,3 +13,5 @@ jobs:
         run: docker build --build-arg GIT_REVISION="$GITHUB_SHA" -t once-campfire-goose:app .
       - name: Exercise production image with fresh storage
         run: python3 test_image.py once-campfire-goose:app
+      - name: Shared Chromium browser smoke
+        run: python3 test_browser.py once-campfire-goose:app

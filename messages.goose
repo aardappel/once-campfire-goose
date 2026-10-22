@@ -11,6 +11,7 @@ import view_data;
 import view_helpers;
 import views_generated;
 import checkpoints;
+import rich_html;
 
 extern fn campfire_disconnected_before(out: u8[>..]&);
 extern fn campfire_writer_enter();
@@ -80,7 +81,7 @@ fn post_message(db: sqlite::Db, writer: const WriterStatements&, req: const http
     guard has_kind && starts_with(kind, "application/x-www-form-urlencoded") else { return 415; }
     var text: u8[>..] = [];
     var client_id: u8[>..] = [];
-    guard http::form_value(body, "message[body]", text) && text.len > 0 else { return 422; }
+    guard http::form_value(body, "message[body]", text) && text.len > 0 && text.len <= 65536 else { return 422; }
     guard http::form_value(body, "message[client_message_id]", client_id) && client_id.len > 0 && client_id.len <= 256 else { return 422; }
     let q=writer.q;
     let insert=writer.insert;
@@ -90,7 +91,8 @@ fn post_message(db: sqlite::Db, writer: const WriterStatements&, req: const http
     let unread=writer.unread;
     var message_id: i64 = 0;
     var saved_room: u8[>..]=[]; var room_kind: u8[..13]=[];
-    var rich_text: u8[>..]=[]; escape(rich_text,text);
+    var rich_text: u8[>..]=[]; rich_sanitize(rich_text,text,false);
+    let plain_text = rich_plain(rich_text);
     var status: i32 = 404;
     var disconnected_before: u8[>..] = [];
     campfire_disconnected_before(disconnected_before);
@@ -123,7 +125,7 @@ fn post_message(db: sqlite::Db, writer: const WriterStatements&, req: const http
                 while sqlite::step(rich) {}
 
                 sqlite::bind_i64(index, 1, message_id);
-                sqlite::bind_text(index, 2, text);
+                sqlite::bind_text(index, 2, plain_text);
                 while sqlite::step(index) {}
 
                 sqlite::bind_text(touch, 1, now);
@@ -157,7 +159,7 @@ fn post_message(db: sqlite::Db, writer: const WriterStatements&, req: const http
         message.dom_id=view_keep(bytes,str("message_",client_id)); message.created_ms=campfire_epoch_ms(now); message.updated_ms=message.created_ms; message.created_iso=view_keep(bytes,time_iso(now));
         message.at_path=view_keep(bytes,str("/rooms/",room_id,"/@",message_id)); message.edit_path=view_keep(bytes,str("/rooms/",room_id,"/messages/",message_id,"/edit"));
         message.boosts_path=view_keep(bytes,str("/messages/",message_id,"/boosts")); message.new_boost_path=view_keep(bytes,str(message.boosts_path,"/new"));
-        message.presentation=view_keep(bytes,str("<div class=\"lexxy-content\">\n  ",rich_text,"\n</div>\n")); message.all_emoji=all_emoji(text);
+        message.presentation=view_keep(bytes,text_presentation(db,rich_text,plain_text,ctx.storage_key)); message.all_emoji=all_emoji(plain_text);
         ctx.room.kind=view_keep(bytes,room_kind);
         render_post_html(out,ctx,message);
         timing[6]=campfire_profile_clock();

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Fetch immutable toolchain/package revisions; compile the pinned Goose compiler."""
 import json
+import hashlib
 import os
+import re
 from pathlib import Path
 import subprocess
 
@@ -20,7 +22,19 @@ def checkout(spec, destination):
         run("git", "-C", destination, "checkout", "--detach", "FETCH_HEAD")
     actual = subprocess.check_output(["git", "-C", str(destination), "rev-parse", "HEAD"], text=True).strip()
     dirty = subprocess.check_output(["git", "-C", str(destination), "status", "--porcelain", "--untracked-files=no"], text=True)
-    if actual != spec["revision"] or dirty:
+    if actual != spec["revision"]:
+        raise SystemExit(f"Dependency must be pristine at {spec['revision']}: {destination}")
+    if patch := spec.get("patch"):
+        path = ROOT / patch["file"]
+        if hashlib.sha256(path.read_bytes()).hexdigest() != patch["sha256"]:
+            raise SystemExit(f"Dependency patch checksum mismatch: {path}")
+        if not dirty:
+            run("git", "-C", destination, "apply", "--index", path)
+        tree = subprocess.check_output(["git", "-C", str(destination), "write-tree"], text=True).strip()
+        unstaged = subprocess.run(["git", "-C", str(destination), "diff", "--quiet"]).returncode
+        if tree != patch["tree"] or unstaged:
+            raise SystemExit(f"Dependency differs from the pinned patched tree: {destination}")
+    elif dirty:
         raise SystemExit(f"Dependency must be pristine at {spec['revision']}: {destination}")
 
 compiler = ROOT / "build/toolchain"
@@ -32,4 +46,6 @@ run("cmake", "--build", compiler / "build", "--parallel", os.environ.get("BUILD_
 home = Path(os.environ.get("GOOSE_HOME", ROOT / "build/home"))
 for package in LOCK["packages"]:
     repository = package["repository"].removeprefix("https://").removesuffix(".git")
-    checkout(package, home / "pkg" / repository / package["ref"])
+    ref = package["ref"]
+    cache_ref = ref[:12] if re.fullmatch(r"[0-9a-fA-F]{7,40}", ref) else ref.replace("/", "_")
+    checkout(package, home / "pkg" / repository / cache_ref)

@@ -18,7 +18,7 @@ from benchmark_shared import command
 
 IMAGES = {
     "rust": os.environ.get("RUST_IMAGE", "sha256:98ba156f688c3fe856afd71655f613a6620bc03754f456ed2ef08fb2e5527e6e"),
-    "jai": os.environ.get("JAI_IMAGE", "sha256:014651a89f16953fab46cc3f322019d932d37ff1a098d98fb71bdf2e976caf92"),
+    "jai": os.environ.get("JAI_IMAGE", "ghcr.io/lucasmeijer/once-campfire-jai@sha256:bbbe5c642001c653906dbe4d6f6d584090b82b352724c77d5f134a081506829e"),
     "goose": os.environ.get("GOOSE_IMAGE", "once-campfire-goose:app"),
 }
 

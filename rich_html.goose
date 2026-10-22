@@ -79,6 +79,19 @@ fn rich_text_segment(out: u8[>..]&, source: const u8[:], autolink: bool) {
     escape(out,decoded[begin..]);
 }
 
+fn rich_plain(source: const u8[:]) -> u8[>..] {
+    var text: u8[>..] = []; var i: i64 = 0;
+    while i < source.len {
+        if source[i] == '<' {
+            var attrs: RichAttr[>..] = []; let tag = rich_tag(source,i,attrs); i = tag.end;
+            if tag.name == "br" || tag.closing && (tag.name == "p" || tag.name == "div" || tag.name == "li") { text.push('\n'); }
+        } else { text.push(source[i]); i++; }
+    }
+    let decoded = html_decode(text); var end = decoded.len;
+    while end > 0 && decoded[end-1] == '\n' { end--; }
+    return str(decoded[..end]);
+}
+
 fn rich_sanitize(out: u8[>..]&, source: const u8[:], autolink: bool=true) {
     let allowed="|a|abbr|acronym|address|b|big|blockquote|br|cite|code|dd|del|dfn|div|dl|dt|em|h1|h2|h3|h4|h5|h6|hr|i|img|ins|kbd|li|mark|ol|p|pre|samp|small|span|strong|sub|sup|time|tt|ul|var|s|u|table|thead|tbody|tfoot|tr|th|td|";
     let attributes="|abbr|alt|cite|class|datetime|height|href|lang|src|title|width|xml:lang|data-language|";

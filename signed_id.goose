@@ -28,10 +28,11 @@ fn base64_url_decode(out: u8[>..]&, data: const u8[:]) -> bool {
     return base64::decode(out, encoded);
 }
 
-fn sign_id(id: i64, purpose: const u8[:], key: const u8[:]) -> u8[>..] {
+fn sign_id(id: i64, purpose: const u8[:], key: const u8[:], expiry: const u8[:] = "") -> u8[>..] {
     var envelope: u8[>..] = [];
     format(envelope, "{\"_rails\":{\"data\":", id, ",\"pur\":");
     json::format_string(envelope, purpose);
+    if expiry.len > 0 { envelope.append(",\"exp\":"); json::format_string(envelope,expiry); }
     envelope.append("}}");
     var out: u8[>..] = [];
     base64_url(out, envelope);

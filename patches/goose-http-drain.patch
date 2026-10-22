@@ -1,0 +1,407 @@
+diff --git a/docs/api.md b/docs/api.md
+index 323cfacbc2835cf394ed7f2f7b0214ee24e1afc2..01eceee68508a38921b1eebbba9fef0645d81fd1 100644
+--- a/docs/api.md
++++ b/docs/api.md
+@@ -390,6 +390,18 @@ thread_fn worker(cfg: http::Config) {
+   head, before its payload arrives.
+ - `http::ws_send(out, op, data)` sends a message in one frame, at any event of the
+   connection's, such as `WAKE` for one from another thread. Text must be UTF-8.
++- `http::after_drain(out)` requests one `DRAINED` event after an upgraded
++  connection's output queue empties into its socket. Call it after `send` or
++  `ws_send`, and accept the next bounded batch only at `DRAINED`. It returns false
++  without an open upgraded stream or bytes sent since the previous request.
++  Repeated requests coalesce, and `CLOSED` replaces the notification if the
++  connection fails. A pending `later` mailbox wait and its deadline stay armed.
++  Socket acceptance does not mean the peer processed the bytes. This API does not
++  limit arbitrary calls to `ws_send`: the program must bound its batches and
++  producer queues. See `examples/drain.goose` for a mailbox publisher that sends
++  one 8 KiB batch per drain credit. On Linux, build that example and run
++  `python3 scripts/test-drain.py /path/to/drain` to test a stalled reader's memory,
++  resumed frame ordering, and disconnect cleanup on both loops.
+ - `http::ws_close(out, st.ws, code, reason)` starts the close: 1000 and no reason by
+   default. Messages that arrive after are dropped, and the connection closes when the
+   client's Close comes, or after `Config.idle_ms`.
+diff --git a/docs/decisions.md b/docs/decisions.md
+index 4d2bad74b594bd3937e0aef8c07249fd8ab92472..572b344b39847c027bc161d23da002002412756c 100644
+--- a/docs/decisions.md
++++ b/docs/decisions.md
+@@ -905,6 +905,19 @@ parameter.
+ 
+ ## Not yet decided
+ 
++### Upgraded streams can request output drain notifications
++
++Implemented 2026-10-22 for review. `after_drain` and `DRAINED` let a publisher
++keep one bounded batch in flight per upgraded connection. The pending bit is a
++`Framing` variant, so ordinary HTTP connections gain no fields or queue storage.
++Both loops deliver the event after their queued output reaches the socket;
++connection failure cancels it through the existing `CLOSED` event.
++
++A general `try_send` admission API would need output accounting exposed to every
++handler, and retry storage in the application. A drain credit lets the publisher
++retain the next message instead. This is opt-in producer flow control, not a
++hard limit on handlers that continue sending without waiting for a credit.
++
+ ### Compression in an optional module
+ 
+ Implemented, with no recorded approval; task 022.
+diff --git a/epoll.goose b/epoll.goose
+index 2abfd45bc2f61ac120f8bed547f2f0108df4b967..76c1e016a5c3f5b987719b6dc2e590e32b60232f 100644
+--- a/epoll.goose
++++ b/epoll.goose
+@@ -388,6 +388,11 @@ fn epoll_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
+             wbuf.clear();
+             woff = 0;
+             sealed = 0;
++            if c.state == OPEN && c.x.stream.open && c.x.stream.framing == Framing.RawDrain {
++                c.x.stream.framing = Framing.Raw;
++                ev = Event { kind: DRAINED, req: nothing, data: "", whole: false, trailers: "" };
++                continue;
++            }
+             while c.x.stream.file >= 0 {
+                 let s .= c.x.stream;
+                 let w = net_sendfile(c.fd, s.file, s.file_off, s.file_left);
+diff --git a/examples/drain.goose b/examples/drain.goose
+new file mode 100644
+index 0000000000000000000000000000000000000000..e6a064248f162737e20500b32e4f78ee1b2dda05
+--- /dev/null
++++ b/examples/drain.goose
+@@ -0,0 +1,60 @@
++// One bounded batch in flight. A broker can release the next batch at DRAINED.
++import std;
++import os;
++import http from "../";
++import hash from "github.com/kaitk/goose-hash@v0.0.4";
++import http.websocket;
++
++struct State { ws: http::WebSocket = http::WebSocket { .. }, next: i64 = 0 }
++struct Credit { to: http::MailAddress, sequence: i64 }
++
++thread_fn publisher() {
++    loop {
++        let credit = qget<Credit>();
++        var data: u8[8192] = ['x'; 8192];
++        for i in 8 { data[i] = (credit.sequence >> (8 * i)) as! u8; }
++        loop {
++            let result = http::mail_send(credit.to, 1, data);
++            if result != http::FULL { break; }
++            sleep_ms(1);
++        }
++    }
++}
++
++fn handle(ev: http::Event, state: State&, out: http::Reply) {
++    if ev.kind == http::REQUEST {
++        guard http::ws_upgrade(ev.req, state.ws, out) else { return; }
++    } else if ev.kind == http::WAKE {
++        http::ws_send(out, http::WS_BINARY, ev.data);
++        assert(http::after_drain(out));
++        http::later(out, 60000);
++        state.next++;
++        return;
++    } else if ev.kind != http::DRAINED {
++        http::ws_read(ev, state.ws, out) { op, data, reply => };
++        return;
++    }
++    if state.next == 4096 {
++        write_stderr("Delivered 32 MiB\n");
++        return;
++    }
++    assert(qput(Credit { to: http::later(out, 60000), sequence: state.next }));
++}
++
++thread_fn worker(cfg: http::Config) {
++    var loop_name: u8[>..] = [];
++    let error = if env("LOOP", loop_name) && loop_name == "epoll" {
++        http::serve_epoll(cfg, State { .. }) { ev, state, out => handle(ev, state, out); }
++    } else {
++        http::serve(cfg, State { .. }) { ev, state, out => handle(ev, state, out); }
++    };
++    http::report(error);
++}
++
++fn main() {
++    qlimit<Credit>(128);
++    thread_spawn(publisher);
++    http::run(http::Config { address: "127.0.0.1", port: 27893, workers: 1,
++        max_conns: 8, max_queued: 4096, write_ms: 60000,
++        mail_slots: 8, mail_size: 8192, max_waiting: 8, .. }, worker);
++}
+diff --git a/http.goose b/http.goose
+index 3716a2bd036efd4396bbf0e4864ac7273ae9f70a..2b4998d23e69f7ddc6790be5c44234d069b262b4 100644
+--- a/http.goose
++++ b/http.goose
+@@ -253,6 +253,9 @@ let WAKE: u8 = 6;
+ // Config.max_waiting exchanges waiting already, which its tag NO_ROOM says.
+ // As WAKE otherwise.
+ let TIMEOUT: u8 = 7;
++// after_drain's output reached the socket. The exchange's mailbox wait, if
++// any, remains armed. CLOSED replaces this event if the connection fails.
++let DRAINED: u8 = 8;
+ // TIMEOUT's tag when the exchange found no room to wait, and got it at once.
+ let NO_ROOM: i32 = 1;
+ // No event, for answer's wake.
+@@ -715,7 +718,7 @@ fn answer<S, H, ROOM, C>(c: C&, rbuf: u8[:], rlen: i64, wbuf: u8[>..]&, common:
+             continue;
+         }
+         // The exchange goes on past this call, in c's slot.
+-        x.body = if x.stream.framing == Framing.Raw { BodyReader.Raw }
++        x.body = if raw(x.stream) { BodyReader.Raw }
+                  else if whole { BodyReader.None }
+                  else if req.chunked { BodyReader.ChunkSize }
+                  else { BodyReader.Length { left: req.body } };
+diff --git a/message.goose b/message.goose
+index addacdb58a629f170966fb42c138f03ceef29324..e932d6eb122f60dec2a7dc90a0ffa8b7708e3d9f 100644
+--- a/message.goose
++++ b/message.goose
+@@ -501,6 +501,21 @@ enum BodyReader {
+     Raw,
+ }
+ 
++fn raw(s: const Stream&) -> bool {
++    return s.framing == Framing.Raw || s.framing == Framing.RawDrain;
++}
++
++// Requests one DRAINED after the bytes sent on this upgraded connection have
++// left the loop's output queue. Call after send/ws_send and wait for DRAINED
++// before accepting another bounded batch. This is socket acceptance, not an
++// acknowledgement from the peer. Repeated requests coalesce; closing cancels it.
++fn after_drain(out: Reply) -> bool {
++    guard out.stream.open && raw(out.stream) && out.stream.moved else { return false; }
++    out.stream.framing = Framing.RawDrain;
++    out.stream.moved = false;
++    return true;
++}
++
+ // Reads the next bytes of r's body from the start of buf, up to and including
+ // one run of data, buf[d0..d1]. Returns d0, d1, and 200, with buf[..d1] used
+ // up; INCOMPLETE, with nothing used, until buf holds a whole size line or
+@@ -769,6 +784,7 @@ enum Framing {
+     Chunked,
+     Close,
+     Raw,
++    RawDrain,
+ }
+ 
+ struct Stream {
+@@ -902,7 +918,7 @@ fn begin(out: Reply, status: i32, length: i64) {
+             format(out.buf, length);
+             out.buf.append("\r\n");
+         },
+-        Close, Raw => {},
++        Close, Raw, RawDrain => {},
+     }
+ }
+ 
+@@ -917,7 +933,7 @@ fn send(out: Reply, data: const u8[:]) {
+     }
+     guard data.len > 0 else { return; }
+     s.moved = true;
+-    if s.framing == Framing.Raw {
++    if raw(s) {
+         out.buf.append(data);
+         return;
+     }
+@@ -935,7 +951,7 @@ fn send(out: Reply, data: const u8[:]) {
+             s.framing = Framing.Length { left: l.left - k };
+             if k < data.len { out.keep_alive = false; }
+         },
+-        Close, Raw => { out.buf.append(data); },
++        Close, Raw, RawDrain => { out.buf.append(data); },
+     }
+ }
+ 
+@@ -946,7 +962,7 @@ fn send(out: Reply, data: const u8[:]) {
+ fn end(out: Reply, trailers: const u8[:] = "") {
+     let s .= out.stream;
+     guard s.open else { return; }
+-    if s.framing == Framing.Raw {
++    if raw(s) {
+         s.open = false;
+         out.keep_alive = false;
+         return;
+@@ -966,7 +982,7 @@ fn end(out: Reply, trailers: const u8[:] = "") {
+             out.buf.append("\r\n");
+         },
+         Length l => { if l.left > 0 { out.keep_alive = false; } },
+-        Close, Raw => {},
++        Close, Raw, RawDrain => {},
+     }
+ }
+ 
+diff --git a/scripts/test-drain.py b/scripts/test-drain.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d7775cf85da409e74a6b12e1936c8190ade7b1bd
+--- /dev/null
++++ b/scripts/test-drain.py
+@@ -0,0 +1,94 @@
++#!/usr/bin/env python3
++"""Stall and resume a WebSocket reader; check every frame and bounded memory."""
++import json
++import os
++from pathlib import Path
++import socket
++import struct
++import subprocess
++import sys
++import tempfile
++import time
++
++
++def rss(pid):
++    for line in Path(f"/proc/{pid}/status").read_text().splitlines():
++        if line.startswith("VmRSS:"):
++            return int(line.split()[1]) * 1024
++    raise AssertionError("no RSS sample")
++
++
++def connect():
++    sock = socket.socket()
++    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16384)
++    sock.settimeout(10)
++    sock.connect(("127.0.0.1", 27893))
++    sock.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n"
++                 b"Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n"
++                 b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n")
++    head = b""
++    while not head.endswith(b"\r\n\r\n"):
++        part = sock.recv(1)
++        assert part, head
++        head += part
++    assert head.startswith(b"HTTP/1.1 101"), head
++    return sock
++
++
++def take(sock, count):
++    result = bytearray()
++    while len(result) < count:
++        part = sock.recv(count - len(result))
++        assert part, "unexpected EOF"
++        result.extend(part)
++    return result
++
++
++for loop in ("uring", "epoll"):
++    with tempfile.TemporaryFile(mode="w+") as log:
++        proc = subprocess.Popen([str(Path(sys.argv[1]).resolve())],
++                                env={**os.environ, "LOOP": loop}, stdout=log, stderr=log)
++        try:
++            for _ in range(100):
++                try:
++                    # Readiness without beginning an output stream.
++                    with socket.create_connection(("127.0.0.1", 27893), timeout=.1):
++                        break
++                except OSError:
++                    assert proc.poll() is None
++                    time.sleep(.05)
++            baseline = rss(proc.pid)
++            with connect() as sock:
++                peak = baseline
++                for _ in range(40):
++                    time.sleep(.05)
++                    peak = max(peak, rss(proc.pid))
++                log.seek(0)
++                assert "Delivered" not in log.read(), "publisher ignored slow reader"
++                assert peak - baseline < 8 * 1024 * 1024, (baseline, peak)
++                for sequence in range(4096):
++                    assert take(sock, 4) == b"\x82\x7e\x20\x00"
++                    payload = take(sock, 8192)
++                    assert struct.unpack("<Q", payload[:8])[0] == sequence
++                    assert payload[8:] == b"x" * 8184
++                sock.settimeout(.1)
++                try:
++                    assert not sock.recv(1), "unexpected duplicate frame"
++                except socket.timeout:
++                    pass
++            # A disconnected slow consumer must release its connection slot.
++            for _ in range(16):
++                with connect():
++                    pass
++            assert proc.poll() is None
++            print(json.dumps({"loop": loop, "frames": 4096, "payload_bytes": 33554432,
++                              "rss_before": baseline, "rss_stalled_peak": peak,
++                              "rss_growth": peak - baseline, "ordered_delivery": True,
++                              "disconnect_reuse": True}), flush=True)
++        finally:
++            proc.terminate()
++            try:
++                proc.wait(timeout=5)
++            except subprocess.TimeoutExpired:
++                proc.kill()
++                proc.wait()
+diff --git a/test/expected/ws_drain.out b/test/expected/ws_drain.out
+new file mode 100644
+index 0000000000000000000000000000000000000000..3fed9bb3253032dcb3b3d5d999495fc20b4814d7
+--- /dev/null
++++ b/test/expected/ws_drain.out
+@@ -0,0 +1 @@
++raw drain: bounded batches, coalescing, and close
+diff --git a/test/websocket/ws_drain.goose b/test/websocket/ws_drain.goose
+new file mode 100644
+index 0000000000000000000000000000000000000000..b3a73454340ca848e929dbab8cd2c435ae219414
+--- /dev/null
++++ b/test/websocket/ws_drain.goose
+@@ -0,0 +1,25 @@
++import std;
++import http from "../../";
++import hash from "github.com/kaitk/goose-hash@v0.0.4";
++import http.websocket;
++
++fn main() {
++    var buf: u8[>..] = [];
++    var keep = true;
++    var stream = http::Stream { .. };
++    let out = http::Reply { buf: buf, common: "", keep_alive: keep,
++                            minor: 1, head: false, stream: stream };
++    assert(!http::after_drain(out));
++    stream.open = true;
++    stream.framing = http::Framing.Raw;
++    assert(!http::after_drain(out));
++    http::ws_send(out, http::WS_TEXT, "abc");
++    assert(http::after_drain(out));
++    assert(!http::after_drain(out));
++    http::ws_send(out, http::WS_TEXT, "def");
++    assert(http::after_drain(out));
++    assert(buf.len == 10 && buf[0] == 0x81 && buf[5] == 0x81);
++    http::end(out);
++    assert(!stream.open && !http::after_drain(out));
++    print("raw drain: bounded batches, coalescing, and close");
++}
+diff --git a/uring.goose b/uring.goose
+index 7e70bad480fe938e75f079e67eb77f58d55dcb7a..9291960bdfa8c5d19e8787671551d6807f2818b9 100644
+--- a/uring.goose
++++ b/uring.goose
+@@ -434,7 +434,7 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
+         // exchange's next one with SOCKET_READY. Once, here: a call in each
+         // of delivered's and timed_out's paths cost the request path 2 user
+         // instructions (bench/count.sh), though none of them runs there.
+-        if ev.kind != NO_EVENT {
++        if ev.kind != NO_EVENT && ev.kind != DRAINED {
+             ring_disarm(r, if wake_at >= 0 { h2streams[wake_at].x.stream.later.key } else { c.x.stream.later.key }, ~0);
+         }
+         progress = false;
+@@ -570,6 +570,11 @@ fn ring_loop<S, H>(cfg: Config, fresh: S, tls) -> Error {
+         c.queued -= res as i64;
+         progress = true;
+         drain(c);
++        if c.queued == 0 && c.state == OPEN && c.x.stream.open && c.x.stream.framing == Framing.RawDrain {
++            c.x.stream.framing = Framing.Raw;
++            let ev = Event { kind: DRAINED, req: nothing, data: "", whole: false, trailers: "" };
++            resume(c, ev);
++        }
+         if c.stalled && !blocked(c) {
+             c.stalled = false;
+             let src = c.held;
+diff --git a/websocket.goose b/websocket.goose
+index e0c6b3a273889a66c7bf3235888481a6c10719e5..7500c469a6a1482a4062cf9dd1fe338a471cafe2 100644
+--- a/websocket.goose
++++ b/websocket.goose
+@@ -354,7 +354,7 @@ fn ws_release(ws: WebSocket&) {
+ 
+ // One unmasked frame, whole, as a server sends it (§5.2).
+ fn ws_frame(out: Reply, op: u8, data: const u8[:]) {
+-    guard out.stream.open && out.stream.framing == Framing.Raw else { return; }
++    guard out.stream.open && raw(out.stream) else { return; }
+     var head: u8[..10] = [];
+     head.push(0x80 | op);
+     let n = data.len;

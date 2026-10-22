@@ -1,8 +1,12 @@
 # Outbound WebSocket flow control
 
-Application expansion stopped at this dependency gap, following the experiment's instruction
-to stop and report options when Goose prevents the next stage. The standalone build and first-run
-setup are complete; the application itself does not expose `/cable` yet.
+The experimental application carries a checksum-pinned patch for this gap. The
+[upstream draft PR](https://github.com/kaitk/goose-http/pull/2) adds `after_drain` and
+`DRAINED`, allowing a publisher to send one bounded batch per socket drain credit.
+All 60 package tests pass at both optimization levels. A mailbox publisher test
+stalls its reader, resumes, and verifies 32 MiB in exact order on both loops with
+no measurable RSS increase during the stall. See [patch details](../patches/README.md).
+The historical reproduction below describes sending without those credits.
 
 ## Reproduction
 
@@ -30,7 +34,7 @@ From a standalone Linux development checkout after `sh build_linux.sh`:
 
 ```sh
 export GOOSE_HOME="$PWD/build/home"
-build/toolchain/build/goose build --offline --cc clang -o build/cable-backpressure repro/cable_backpressure.goose
+build/toolchain/build/goose build --cc clang -o build/cable-backpressure repro/cable_backpressure.goose
 python3 repro/check_backpressure.py build/cable-backpressure
 python3 repro/check_backpressure.py build/cable-backpressure --read
 python3 repro/prepare_backpressure.py

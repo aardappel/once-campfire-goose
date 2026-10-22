@@ -85,11 +85,10 @@ def main():
     parser.add_argument("--seed", type=Path, required=True)
     parser.add_argument("--runtime-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--executable", type=Path, default=Path("build/campfire"))
     parser.add_argument("--apps", default="goose,rust,jai")
-    parser.add_argument("--goose-image", default="goose-campfire-toolchain:latest")
+    parser.add_argument("--goose-image", default="once-campfire-goose:app")
     parser.add_argument("--rust-image", default="ghcr.io/basecamp/once-campfire-rust:main")
-    parser.add_argument("--jai-image", default="ghcr.io/lucasmeijer/once-campfire-jai:e56ba63")
+    parser.add_argument("--jai-image", default="ghcr.io/lucasmeijer/once-campfire-jai:2ecd487")
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--duration", type=int, default=8)
     parser.add_argument("--clients", type=int, default=16)
@@ -107,8 +106,8 @@ def main():
     assert selected and set(selected) <= {"room_show", "messages_page", "sidebar", "search", "avatar", "static_css", "up", "post_message"}
     repo = Path(__file__).resolve().parent
     verification, seed = args.verification.resolve(), args.seed.resolve()
-    executable, output, runtime = args.executable.resolve(), args.output.resolve(), args.runtime_root.resolve()
-    assert executable.is_relative_to(repo) and runtime.is_dir()
+    output, runtime = args.output.resolve(), args.runtime_root.resolve()
+    runtime.mkdir(parents=True, exist_ok=True)
     output.mkdir(parents=True, exist_ok=False)
     loadgen = verification / "loadgen/target/release/loadgen"
     labels = json.loads((seed / "labels.json").read_text())
@@ -143,7 +142,8 @@ def main():
         "verification_revision": git(verification, "rev-parse", "HEAD"),
         "verification_dirty": bool(git(verification, "status", "--porcelain", "--untracked-files=no")),
         "goose_revision": git(repo, "rev-parse", "HEAD"), "goose_dirty": bool(git(repo, "status", "--porcelain")),
-        "executable_sha256": checksum(executable), "loadgen_sha256": checksum(loadgen),
+        "executable_sha256": command("docker", "run", "--rm", "--entrypoint", "sha256sum", images["goose"]["id"], "/usr/local/bin/campfire").stdout.split()[0] if "goose" in images else None,
+        "loadgen_sha256": checksum(loadgen),
         "seed_sha256": checksum(seed / "db/production.sqlite3"), "seed_source": json.loads((seed / "source.json").read_text()),
         "images": images, "server_cpus": server_cpus, "client_cpus": client_cpus, "memory_limit_bytes": 2 * 1024**3,
         "platform": platform.platform(), "cpu_model": next(line.split(":", 1)[1].strip() for line in Path("/proc/cpuinfo").read_text().splitlines() if line.startswith("model name")),
@@ -154,6 +154,7 @@ def main():
         "write_audit_sha256": checksum(verification / "bench/validate_acks.rb"),
     }
     assert not metadata["verification_dirty"], "verification checkout must be unmodified"
+    assert not metadata["goose_dirty"], "commit the experimental source before recording measurements"
     save(output / "metadata.json", metadata)
     results = []
     sequence = 0
@@ -197,11 +198,7 @@ def main():
                               "--env-file", str(env_file)]
                     for folder, mount in (("db", "db"), ("files", "files"), ("logs", "logs")):
                         launch += ["-v", f"{data / folder}:/rails/storage/{mount}"]
-                    if app == "goose":
-                        launch += ["-v", f"{repo}:/app:ro", "--workdir", "/app"]
                     launch += [images[app]["id"]]
-                    if app == "goose":
-                        launch += ["/app/" + executable.relative_to(repo).as_posix()]
                     row = {"app": app, "round": iteration + 1, "profile": profile, "samples": []}
                     label = f"{app}-{profile}-{iteration + 1}"
                     audits, acknowledged = [], 0
@@ -312,7 +309,9 @@ def main():
                             (output / f"{label}-server.log").write_text(log.stdout + log.stderr)
                         command("docker", "rm", "-f", name, check=False)
     assert checksum(seed / "db/production.sqlite3") == metadata["seed_sha256"], "source seed changed"
-    assert checksum(executable) == metadata["executable_sha256"], "executable changed during measurement"
+    if "goose" in images:
+        measured = command("docker", "run", "--rm", "--entrypoint", "sha256sum", images["goose"]["id"], "/usr/local/bin/campfire").stdout.split()[0]
+        assert measured == metadata["executable_sha256"], "executable changed during measurement"
     metadata["complete"] = True
     metadata["finished_at"] = datetime.now(timezone.utc).isoformat()
     summary = {}

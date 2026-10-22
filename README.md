@@ -3,9 +3,10 @@
 An experimental Campfire implementation in [Goose](https://github.com/aardappel/goose).
 The implemented HTTP routes pass the shared response contracts and persisted-write audits.
 Rendering matches 27 differential cases against the pinned Rust and Jai references.
-Fresh database initialization, first-run administrator creation and invitation joining are implemented.
-Full application/browser compatibility is in progress; live updates, editing, administration,
-and uploads are not implemented yet. This is not ready to replace a production Campfire installation.
+Fresh setup, invitations, live messaging, edits, profile/account forms, rooms, bots, session
+transfers, QR codes and direct-ping creation are implemented. The unmodified shared Chromium
+smoke test covers these flows. Full application compatibility is still in progress; see
+[browser coverage and delivery semantics](docs/browser-parity.md).
 
 ## Build and test
 
@@ -17,10 +18,11 @@ Docker builds the public Goose compiler and packages at the immutable revisions 
 docker build --target test -t once-campfire-goose:test .
 docker build --build-arg GIT_REVISION="$(git rev-parse HEAD)" -t once-campfire-goose:app .
 python3 test_image.py once-campfire-goose:app
+python3 test_browser.py once-campfire-goose:app
 ```
 
 For a Linux development build with Clang, CMake, Ninja, Python 3, Git, liburing-dev,
-libssl-dev and libcrypt-dev installed, run `sh build_linux.sh`.
+libssl-dev, libcrypt-dev and libqrencode-dev installed, run `sh build_linux.sh`.
 Build products and dependency checkouts stay under ignored `build/`.
 
 ## Run against disposable Campfire storage
@@ -38,12 +40,12 @@ visit `/first_run` to create the account and administrator. Existing Campfire da
 disables response caching. `DATABASE_PATH` and `STORAGE_PATH` override storage locations.
 TLS should terminate at a reverse proxy; application deployment compatibility is still in progress.
 
-## Current blocker
+## Pinned HTTP patch
 
-Server-initiated WebSocket sends in both goose-http v0.4.3 and v0.5.4 can accumulate beyond
-the read-side backpressure threshold when a client stops reading. Application expansion is
-paused pending a bounded push/drain API; see the [reproducer and repair options](docs/websocket-backpressure.md).
-The application does not expose WebSockets yet.
+The build carries a checksum-pinned goose-http patch adding outbound drain notifications,
+submitted as [upstream PR #2](https://github.com/kaitk/goose-http/pull/2).
+The application uses these credits to bound WebSocket output when readers stall.
+See the [patch pin](patches/README.md) and [reproducer](docs/websocket-backpressure.md).
 
 ## Verification and provenance
 

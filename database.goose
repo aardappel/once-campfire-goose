@@ -37,6 +37,12 @@ fn sql_number(db, query: const u8[:], args: u8[][]) -> i64 {
     return 0;
 }
 
+fn sql_value(db, query: const u8[:], args: u8[][]) -> u8[] {
+    let rows = sql_rows(db,query,copy(args));
+    for row in rows { for cell in row { return copy(cell); } }
+    return [];
+}
+
 fn initialize_database(path: const u8[:]) {
     var db = sqlite::Db {};
     let failed = sqlite::run() {
