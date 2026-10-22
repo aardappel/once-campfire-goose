@@ -10,6 +10,7 @@ compiler="$PWD/build/toolchain/build/goose"
 "$compiler" check --offline -O2 repro/http_compatibility.goose
 "$compiler" build --offline --cc clang -o build/campfire campfire.goose
 if [ "${1:-}" != "--build-only" ]; then
+    python3 test_setup.py build/campfire
     python3 test_server.py build/campfire
     python3 test_server.py build/campfire --no-cache
     for test in cache auth render; do

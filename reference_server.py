@@ -28,7 +28,9 @@ class Server:
         self.app, self.seed, self.output = app, Path(seed).resolve(), Path(output).resolve()
         self.binary = binary
         self.repo = Path(__file__).resolve().parent
-        self.temporary = tempfile.TemporaryDirectory(prefix=f"render-{app}-", dir=Path(runtime).resolve())
+        runtime_root = Path(runtime).resolve()
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(prefix=f"render-{app}-", dir=runtime_root)
         self.data = Path(self.temporary.name)
         self.database = self.data / "db/production.sqlite3"
         self.name = f"goose-render-{app}-{uuid.uuid4().hex[:10]}"

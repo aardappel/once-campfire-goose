@@ -1,4 +1,6 @@
 import std;
+import database;
+import setup;
 import os;
 import http from "github.com/kaitk/goose-http@v0.4.3";
 import hash from "github.com/kaitk/goose-hash@v0.0.4";
@@ -79,6 +81,7 @@ fn handle(db: sqlite::Db, writer: const campfire::WriterStatements&, entries: ca
         http::respond(out, 200, "text/html", "<!DOCTYPE html><html><body style=\"background-color: green\"></body></html>");
         return;
     }
+    if campfire::setup_route(db, req, body, settings.cookie_key, out) { return; }
     if path == "/session/new" && req.method == "GET" {
         http::respond(out, 200, "text/html; charset=utf-8", "<!DOCTYPE html><html><head><title>Campfire</title></head><body><h1>Sign in to Campfire</h1><form action=\"/session\" method=\"post\"><label>Email <input type=\"email\" name=\"email_address\" required></label><label>Password <input type=\"password\" name=\"password\" required></label><button>Sign in</button></form></body></html>");
         return;
@@ -282,6 +285,7 @@ fn main() {
         guard ok && workers > 0 && workers <= 256 else { abort("invalid CAMPFIRE_HTTP_THREADS"); }
         cfg.workers = workers;
     }
+    campfire::initialize_database(settings.database);
     qlimit<campfire::CheckpointJob>(1);
     let checkpointer=thread_spawn(campfire::checkpointer,copy(settings.database));
     http::run(cfg, worker);

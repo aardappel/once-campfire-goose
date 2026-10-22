@@ -1,0 +1,58 @@
+{
+  "compiler": "d9573d8139de395cd4549b876c176c25eb878fc1",
+  "http_revisions": {
+    "v0.4.3": "0a016bb079a890b725d92e43715e214f9a6015db",
+    "v0.5.4": "e456443241af004fe5784af4d7b3597a54422a62"
+  },
+  "environment": "Linux under Docker on WSL2, default security profile; serve() and explicit serve_epoll()",
+  "mail_slots": 8,
+  "mail_size": 8192,
+  "epoll_write_buffer_bytes": 8192,
+  "samples": {
+    "v0.4.3-serve-slow": {
+      "reading": false,
+      "configured_max_queued_bytes": 4096,
+      "published_payload_bytes": 33554432,
+      "received_frame_bytes": 0,
+      "rss_before": 1380352,
+      "rss_peak": 51372032,
+      "rss_growth": 49991680
+    },
+    "v0.4.3-serve-fast": {
+      "reading": true,
+      "configured_max_queued_bytes": 4096,
+      "published_payload_bytes": 33554432,
+      "received_frame_bytes": 33570816,
+      "rss_before": 1368064,
+      "rss_peak": 2154496,
+      "rss_growth": 786432
+    },
+    "v0.5.4-serve-slow": {
+      "reading": false,
+      "configured_max_queued_bytes": 4096,
+      "published_payload_bytes": 33554432,
+      "received_frame_bytes": 0,
+      "rss_before": 1392640,
+      "rss_peak": 52625408,
+      "rss_growth": 51232768
+    },
+    "v0.5.4-serve-fast": {
+      "reading": true,
+      "configured_max_queued_bytes": 4096,
+      "published_payload_bytes": 33554432,
+      "received_frame_bytes": 33570816,
+      "rss_before": 1380352,
+      "rss_peak": 2093056,
+      "rss_growth": 712704
+    },
+    "v0.5.4-epoll-slow": {
+      "reading": false,
+      "configured_max_queued_bytes": 4096,
+      "published_payload_bytes": 33554432,
+      "received_frame_bytes": 0,
+      "rss_before": 1392640,
+      "rss_peak": 69070848,
+      "rss_growth": 67678208
+    }
+  }
+}

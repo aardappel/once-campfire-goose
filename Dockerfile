@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /rails
 COPY --from=build /src/build/campfire /usr/local/bin/campfire
 COPY assets/reference assets/reference
+COPY data data
 COPY LICENSE /usr/share/doc/once-campfire-goose/LICENSE
 COPY views/MIT-LICENSE /usr/share/doc/once-campfire-goose/MIT-LICENSE
 USER 1000:1000

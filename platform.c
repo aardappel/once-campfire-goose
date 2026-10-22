@@ -179,3 +179,22 @@ int32_t campfire_password_verify(campfire_bytes password, campfire_bytes digest)
     return difference == 0;
 #endif
 }
+
+uint8_t campfire_password_hash(campfire_bytes password, campfire_bytes entropy, gs_rref out) {
+#ifdef _WIN32
+    (void)password; (void)entropy; (void)out;
+    return 0;
+#else
+    if (password.len < 1 || password.len > 72 || entropy.len != 16 || memchr(password.data, 0, (size_t)password.len)) return 0;
+    char input[73], setting[CRYPT_GENSALT_OUTPUT_SIZE];
+    memcpy(input, password.data, (size_t)password.len); input[password.len] = 0;
+    if (!crypt_gensalt_rn("$2b$", 12, (const char *)entropy.data, (int)entropy.len, setting, sizeof setting)) return 0;
+    struct crypt_data state = {0};
+    const char *digest = crypt_r(input, setting, &state);
+    if (!digest || strlen(digest) != 60) return 0;
+    gs_bld_append(out, digest, 60);
+    memset(input, 0, sizeof input);
+    memset(&state, 0, sizeof state);
+    return 1;
+#endif
+}
