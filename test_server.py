@@ -20,6 +20,7 @@ import secrets
 import socket
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 from urllib.parse import quote, urlencode
@@ -189,6 +190,12 @@ def main():
                         assert status == 200 and headers["X-Campfire-Cache"] == "miss"
                         status, body, headers = request(route, connection=conn)
                         assert status == 200 and body == original and headers["X-Campfire-Cache"] == "hit"
+                        if sys.platform.startswith("linux"):
+                            for _ in range(10):
+                                if headers.get("X-Campfire-Snapshot") == "wal":
+                                    break
+                                headers = request(route, connection=conn)[2]
+                            assert headers.get("X-Campfire-Snapshot") == "wal", headers
                         assert request(route, gzip_body=False, connection=conn)[1] == original
                         assert request(route, method="HEAD", connection=conn)[1] == ""
                         hidden = cookie(secret, "hidden-session")
@@ -210,6 +217,16 @@ def main():
                         status, body, headers = request(route, connection=conn)
                         assert status == 200 and headers["X-Campfire-Cache"] == "miss"
                         assert "Renamed &amp; room" in body and "Updated message 100" in body
+                        db.execute("UPDATE rooms SET name='Uncommitted room' WHERE id=1")
+                        assert "Renamed &amp; room" in request(route, connection=conn)[1]
+                        db.rollback()
+                        assert "Renamed &amp; room" in request(route, connection=conn)[1]
+                        assert db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
+                        db.execute("UPDATE rooms SET name='Restarted WAL room' WHERE id=1")
+                        db.commit()
+                        status, body, headers = request(route, connection=conn)
+                        assert status == 200 and "Restarted WAL room" in body
+                        assert "Uncommitted room" not in body and headers["X-Campfire-Cache"] == "miss"
                         for n in range(130):
                             status, body, _ = request(f"/rooms/1?evict={n}", connection=conn)
                             assert status == 200 and ids(body) == list(range(61, 101))
@@ -222,7 +239,7 @@ def main():
                         assert request(route, connection=conn)[0] == 200
                     finally:
                         conn.close()
-                    print("PASS: real cache hits, user isolation, cookie expiry, external changes and entry eviction")
+                    print("PASS: real cache hits, user isolation, cookie expiry, external changes, rolled-back writes, WAL restart and entry eviction")
 
                 posted = "bench write a123beef"
                 encoded = urlencode({"message[body]": posted, "message[client_message_id]": "new-client"})

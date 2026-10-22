@@ -24,7 +24,7 @@ from test_server import cookie, fixture
 from test_html import message_text
 
 
-def affinity():
+def affinity(client_cores=None):
     available = sorted(os.sched_getaffinity(0))
     representatives = {}
     for cpu in available:
@@ -35,7 +35,10 @@ def affinity():
     if len(cores) < 2:
         raise SystemExit("at least two separate CPU cores are required")
     count = min(4, len(cores) // 2)
-    return cores[:count], cores[count:count * 2]
+    clients = count if client_cores is None else client_cores
+    if clients < 1 or count + clients > len(cores):
+        raise SystemExit("requested client CPU cores do not fit beside the server cores")
+    return cores[:count], cores[count:count + clients]
 
 
 def main():

@@ -35,5 +35,8 @@ fn main() {
     assert(bytes[entries[0].plain_start..entries[0].gzip_start] == "ok");
     campfire::clear_cache(state);
     assert(campfire::find_page(entries, bytes, state, 1, "/c") == -1);
+    campfire::store_page(entries, bytes, state, 1, "/a", "one", "", "Host: one");
+    assert(campfire::find_page(entries, bytes, state, 1, "/a", "Host: one") == 0);
+    assert(campfire::find_page(entries, bytes, state, 1, "/a", "Host: two") == -1);
     print("Cache key isolation, content, capacity eviction and reset passed");
 }

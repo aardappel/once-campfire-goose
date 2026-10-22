@@ -92,6 +92,7 @@ def main():
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--duration", type=int, default=8)
     parser.add_argument("--clients", type=int, default=16)
+    parser.add_argument("--client-cores", type=int, help="separate physical cores for the validator (default: same count as server)")
     parser.add_argument("--profiles", default="baseline,mixed")
     parser.add_argument("--routes", default="room_show,messages_page,sidebar,search,post_message")
     parser.add_argument("--preflight-only", action="store_true")
@@ -114,7 +115,7 @@ def main():
     fixture_env = dict(line.split("=", 1) for line in (seed / "reference.env").read_text().splitlines()
                        if line and not line.startswith("#"))
     room, write_room = labels["rooms.watercooler"], labels["rooms.hq"]
-    server_cpus, client_cpus = affinity()
+    server_cpus, client_cpus = affinity(args.client_cores)
     cpu_list = lambda cpus: ",".join(map(str, cpus))
     images = {}
     for app in apps:

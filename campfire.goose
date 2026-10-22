@@ -51,6 +51,9 @@ struct Exchange {
 extern fn campfire_now(out: u8[>..]&);
 extern fn campfire_sql_now(out: u8[>..]&);
 extern fn campfire_profile_enable(enabled: bool);
+extern fn campfire_cache_begin(handle: i64) -> i32;
+extern fn campfire_cache_confirm(handle: i64);
+extern fn campfire_cache_current(handle: i64) -> i32;
 
 fn authenticate(db: sqlite::Db, req: const http::Request&, key: const u8[:], state: campfire::CacheState&) -> i64 {
     let raw, has_cookie = http::cookie_of(req, "session_token");
@@ -225,6 +228,14 @@ fn request(db: sqlite::Db, writer: const campfire::WriterStatements&, version: s
         campfire::clear_cache(state);
         return;
     }
+    if state.auth_user>0 && campfire_cache_current(db.id)!=0 {
+        let raw,present=http::cookie_of(req,"session_token");
+        var now: u8[>..]=[]; campfire_now(now);
+        if present && raw==state.auth_cookie && now.len==24 &&
+           (state.auth_expiry.len==0 || compare(now,state.auth_expiry)<0) &&
+           campfire::cached_page(entries,bytes,state,state.auth_user,req,out,true) {return;}
+    }
+    if campfire_cache_begin(db.id)!=0 {campfire::clear_cache(state);}
     let failed = sqlite::run() {
         sqlite::exec(db, "BEGIN");
         // data_version opens the read snapshot used by authentication and rendering.
@@ -247,7 +258,7 @@ fn request(db: sqlite::Db, writer: const campfire::WriterStatements&, version: s
     if failed.len > 0 {
         campfire::clear_cache(state);
         http::respond(out, 500, "text/plain", "Database error");
-    }
+    } else {campfire_cache_confirm(db.id);}
 }
 
 thread_fn worker(cfg: http::Config) {
