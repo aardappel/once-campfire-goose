@@ -43,7 +43,7 @@ def main():
         context.mkdir()
         hashes = {}
         for file in ("package.json", "package-lock.json", "smoke.mjs"):
-            source = verification / "browser" / file
+            source = verification / "browser" / file if file == "smoke.mjs" else verification / file
             shutil.copyfile(source, context / file)
             hashes[file] = hashlib.sha256(source.read_bytes()).hexdigest()
         (context / "Dockerfile").write_text(f"FROM {PLAYWRIGHT}\nWORKDIR /tests\nCOPY package*.json ./\nRUN npm ci\nCOPY smoke.mjs ./\nENTRYPOINT [\"node\", \"smoke.mjs\"]\n")
