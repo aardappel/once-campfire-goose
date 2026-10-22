@@ -53,8 +53,16 @@ See the [patch pin](patches/README.md) and [reproducer](docs/websocket-backpress
 
 `test_server.py`, native unit tests, and the differential rendering tests are preserved from
 the experiment. Historical results and limitations are in [docs/experiment.md](docs/experiment.md).
-Those measurements used Jai `e56ba63`, not its newer `2ecd487`; no current superiority claim is made.
-The next comparison will use the packaged image and the official shared runner.
+The [current comparison](docs/benchmarks.md) uses packaged images, current Rust/Jai references,
+the unchanged shared load generator and validators, and audited writes. It records throughput,
+memory, exact versions, and workload limits. The old Jai `e56ba63` measurements do not describe
+the current `2ecd487` comparison. See [cache validation](docs/read-cache.md) for the read path.
+
+On the recorded four-core server allocation, Goose's three-round medians are 208k room
+reads/s and 8.5k posts/s, versus current Jai's 191k and 5.3k, and Rust's 28.7k and 4.1k.
+Anonymous memory sampled after writes is 28.3 MiB, versus 105.0 MiB for Jai and 92.0 MiB
+for Rust. These HTTP workloads have no live subscribers; they do not measure full application
+or broadcast capacity. The report includes ranges and remaining compatibility work.
 
 Application source was extracted from `aardappel/goose` revision
 `9bbf9446` (`bench/campfire`) onto the experimental branch. The Goose compiler remains a separate dependency.

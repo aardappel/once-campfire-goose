@@ -17,7 +17,7 @@ import uuid
 from benchmark_shared import command
 
 IMAGES = {
-    "rust": os.environ.get("RUST_IMAGE", "sha256:98ba156f688c3fe856afd71655f613a6620bc03754f456ed2ef08fb2e5527e6e"),
+    "rust": os.environ.get("RUST_IMAGE", "ghcr.io/basecamp/once-campfire-rust@sha256:98ba156f688c3fe856afd71655f613a6620bc03754f456ed2ef08fb2e5527e6e"),
     "jai": os.environ.get("JAI_IMAGE", "ghcr.io/lucasmeijer/once-campfire-jai@sha256:bbbe5c642001c653906dbe4d6f6d584090b82b352724c77d5f134a081506829e"),
     "goose": os.environ.get("GOOSE_IMAGE", "once-campfire-goose:app"),
 }
