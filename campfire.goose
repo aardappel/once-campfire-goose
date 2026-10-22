@@ -33,7 +33,7 @@ struct Settings {
     storage: u8[..1024] = "storage",
     cache_enabled: bool = true,
     cache_diagnostics: bool = false,
-    epoll: bool = true,
+    epoll: bool = false,
 }
 
 var settings = Settings { .. };

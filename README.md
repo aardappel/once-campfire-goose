@@ -38,8 +38,8 @@ Storage must be writable by UID 1000. An empty database is initialized from the 
 visit `/first_run` to create the account and administrator. Existing Campfire databases are preserved.
 `HTTP_PORT` defaults to 3000 in the image, `CAMPFIRE_HTTP_THREADS` to 4, and `CAMPFIRE_CACHE=0`
 disables response caching. `DATABASE_PATH` and `STORAGE_PATH` override storage locations.
-`CAMPFIRE_HTTP_BACKEND=epoll` is the Linux default; `auto` selects goose-http's native
-completion loop or its fallback. Both backends run the HTTP and WebSocket integration tests.
+`CAMPFIRE_HTTP_BACKEND=auto` selects goose-http's native completion loop or its fallback;
+`epoll` selects the direct Linux loop. Both backends run the HTTP and WebSocket integration tests.
 TLS should terminate at a reverse proxy; application deployment compatibility is still in progress.
 
 ## Pinned HTTP patch
