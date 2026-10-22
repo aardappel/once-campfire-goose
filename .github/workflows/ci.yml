@@ -1,0 +1,13 @@
+name: Build and verify
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run application tests
+        run: docker build --target test -t once-campfire-goose:test .
+      - name: Build production image
+        run: docker build --build-arg GIT_REVISION="$GITHUB_SHA" -t once-campfire-goose:app .

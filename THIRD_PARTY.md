@@ -1,0 +1,11 @@
+# Third-party source
+
+The templates under `views/templates` and frontend files under `assets/reference` come from
+37signals' Campfire and its Rust rewrite at revision `6dae2fd3c1a2dce61ca11beb731bcce2b42b67ad`.
+They retain the [MIT license](views/MIT-LICENSE) and any license notices embedded in files.
+Template provenance and hashes are in `views/source.json`; asset hashes are in `views/assets.json`.
+
+Goose and the Goose HTTP/hash/compression/SQLite packages are fetched separately at the
+revisions in `dependencies.json`; their original license files remain in their checkouts.
+SQLite is prepared with FTS5 enabled and the WAL observation shim in `sqlite_wal.c` appended.
+`prepare.py` accepts only the pinned original files or that exact patch.

@@ -1,0 +1,30 @@
+{
+  "compiler": {
+    "repository": "https://github.com/aardappel/goose.git",
+    "revision": "d9573d8139de395cd4549b876c176c25eb878fc1"
+  },
+  "packages": [
+    {
+      "name": "http",
+      "repository": "https://github.com/kaitk/goose-http.git",
+      "ref": "v0.4.3",
+      "revision": "0a016bb079a890b725d92e43715e214f9a6015db"
+    },
+    {
+      "name": "hash",
+      "repository": "https://github.com/kaitk/goose-hash.git",
+      "ref": "v0.0.4",
+      "revision": "ab31df5c62681a76673ae69cb28a2b6f95ba4422"
+    },
+    {
+      "name": "compress",
+      "repository": "https://github.com/kaitk/goose-compress.git",
+      "ref": "v0.1.1",
+      "revision": "84b12a0a53e0a7ffbb411fef5a6d193848010ea2"
+    }
+  ],
+  "sqlite": {
+    "repository": "https://github.com/kaitk/goose-sqlite.git",
+    "revision": "739fa6af40ecaa48a59d032114e01975c53edd85"
+  }
+}
