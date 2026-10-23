@@ -62,6 +62,41 @@ new-kernel run. Sources: [HTTP shim requirements](https://github.com/kaitk/goose
 [Docker seccomp](https://docs.docker.com/engine/security/seccomp/), and
 [WSL update commands](https://learn.microsoft.com/en-us/windows/wsl/basic-commands#update-wsl).
 
+## Unpatched application validation after the kernel update
+
+The application uses pristine HTTP revision `75f0362919dd7140bc672f4cbecfb69033c500fc`;
+the built dependency checkout has no tracked changes. The full test-image matrix
+passes under Docker's default policy, exercising the emulated ring and direct epoll.
+Under the restricted io_uring profile, setup, authentication, caching on/off,
+revocation/WAL recovery, rollback, 32 concurrent acknowledged writes, fragmented
+200 KiB WebSocket delivery, two-reader fan-out and disconnect cleanup also pass.
+
+The production image passes smoke checks with both policies. With the io_uring
+profile, the unchanged Chromium suite passes, as do all 27 differential rendering
+cases against each pinned Rust/Jai reference and all 315 asset checks. A separate
+production-process probe confirms four `anon_inode:[io_uring]` descriptors and a
+successful HTTP response. Native operation is confirmed, not inferred from `auto`.
+
+Unpatched upstream's native allocation-failure fixture runs successfully rather
+than skipping. Native io_uring and direct epoll both pass 32 MiB ordered delivery,
+stalled-reader recovery, disconnected-slot reuse, fairness and active deadline tests.
+No throughput comparison has been rerun on the new kernel.
+
+```text
+Application source: 217ec3a2558f049fa2624417805a46fcb8366fc6
+Image: sha256:777866f3758ece0af9b41db39022d2ce7b6b669a4f16c792111d856d74445c26
+Executable SHA-256: 18c877f7c9ed3211b791aa46ce982213b445c61d2abb3474dd748faa6a72c729
+WSL: 3.0.3.0
+Kernel: 6.18.54.1-microsoft-standard-WSL2
+Docker: 29.1.3
+```
+
+Raw records remain ignored under `build/unpatched-*`, `build/browser-unpatched-native`
+and `build/native-http-tests.log`. The browser/rendering checks use a test-only Docker
+launcher that supplies the profile for the Goose image; reference images and shared
+validators remain unchanged. The earlier patched image is retained under
+`once-campfire-goose:retired-send-copy` for provenance.
+
 ## Historical patched rebase validation
 
 GCC address/undefined-behavior sanitizers and all 60 HTTP package tests at `-O0` and
