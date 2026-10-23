@@ -12,6 +12,7 @@ struct CachedPage {
     plain_start: i64 = 0,
     gzip_start: i64 = 0,
     end: i64 = 0,
+    coding: http::Coding = http::Coding.Identity,
 }
 
 struct CacheState {
@@ -44,7 +45,8 @@ fn find_page(entries: const CachedPage[:], bytes: const u8[:], state: const Cach
 // Storage grows to its high-water mark within byte_limit and is reused across
 // generations. Entries contain offsets, so growth cannot invalidate their locations.
 fn store_page(entries: CachedPage[:], bytes: u8[>..]&, state: CacheState&, user: i64,
-              target: const u8[:], plain: const u8[:], packed: const u8[:], fields: const u8[:] = "") {
+              target: const u8[:], plain: const u8[:], packed: const u8[:], fields: const u8[:] = "",
+              coding: http::Coding = http::Coding.Identity) {
     let size = target.len + fields.len + plain.len + packed.len;
     if entries.len == 0 || size > 1024 * 1024 || size > state.byte_limit || target.len > 2048 || fields.len > 16384 { return; }
     if state.count >= entries.len || state.used + size > state.byte_limit { clear_cache(state); }
@@ -59,15 +61,14 @@ fn store_page(entries: CachedPage[:], bytes: u8[>..]&, state: CacheState&, user:
     copy_into(bytes[plain_start..gzip_start], plain);
     copy_into(bytes[gzip_start..end], packed);
     entries[state.count] = CachedPage { user: user, target_start: start, fields_start: fields_start, plain_start: plain_start,
-                                       gzip_start: gzip_start, end: end };
+                                       gzip_start: gzip_start, end: end, coding: coding };
     state.count += 1;
     state.used = end;
 }
 
 fn send_page(out: http::Reply, req: const http::Request&, plain: const u8[:], gzip: const u8[:],
-             diagnostics: bool, hit: bool, snapshot: bool = false) {
-    let coding = if out.head || plain.len < 1024 { http::Coding.Identity }
-                 else { http::coding_for(req, http::Compression { .. }) };
+             accepted: http::Coding, diagnostics: bool, hit: bool, snapshot: bool = false) {
+    let coding = if out.head { http::Coding.Identity } else { accepted };
     if coding == http::Coding.Deflate || coding == http::Coding.Zstd {
         http::respond_compressed(out, req, 200, "text/html; charset=utf-8", plain);
         return;
@@ -92,7 +93,7 @@ fn cached_page(entries: const CachedPage[:], bytes: const u8[:], state: const Ca
     let index = find_page(entries, bytes, state, user, req.target, req.fields);
     if index < 0 { return false; }
     let entry = entries[index];
-    send_page(out, req, bytes[entry.plain_start..entry.gzip_start], bytes[entry.gzip_start..entry.end], state.diagnostics, true, snapshot);
+    send_page(out, req, bytes[entry.plain_start..entry.gzip_start], bytes[entry.gzip_start..entry.end], entry.coding, state.diagnostics, true, snapshot);
     return true;
 }
 
@@ -108,6 +109,8 @@ fn cache_page(entries: CachedPage[:], bytes: u8[>..]&, state: CacheState&,
         compress::write(encoder, body, packed);
         compress::finish(encoder, packed);
     }
-    send_page(out, req, body, packed, state.diagnostics, false);
-    store_page(entries, bytes, state, user, req.target, body, packed, req.fields);
+    // Exact header bytes are part of the cache key, so negotiation is stable on a hit.
+    let coding = if body.len < 1024 { http::Coding.Identity } else { http::coding_for(req, http::Compression { .. }) };
+    send_page(out, req, body, packed, coding, state.diagnostics, false);
+    store_page(entries, bytes, state, user, req.target, body, packed, req.fields, coding);
 }

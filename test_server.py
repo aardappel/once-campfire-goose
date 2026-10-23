@@ -8,6 +8,7 @@ import ctypes
 import ctypes.util
 from datetime import datetime, timedelta, timezone
 import gzip
+import zlib
 import hashlib
 import hmac
 import http.client
@@ -120,6 +121,8 @@ def main():
                         body = response.read()
                         if method != "HEAD" and response.getheader("Content-Encoding") == "gzip":
                             body = gzip.decompress(body)
+                        elif method != "HEAD" and response.getheader("Content-Encoding") == "deflate":
+                            body = zlib.decompress(body)
                         return response.status, body.decode(), dict(response.getheaders())
                     finally:
                         if connection is None:
@@ -198,6 +201,19 @@ def main():
                             assert headers.get("X-Campfire-Snapshot") == "wal", headers
                         assert request(route, gzip_body=False, connection=conn)[1] == original
                         assert request(route, method="HEAD", connection=conn)[1] == ""
+                        for _ in range(2):
+                            for accept, expected in (("gzip", "gzip"), ("gzip;q=0, deflate;q=1", "deflate"),
+                                                     ("gzip;q=0, identity", None), ("gzip;q=0.5, deflate;q=0.1", "gzip")):
+                                status, body, headers = request(route, connection=conn, extra_headers={"Accept-Encoding": accept})
+                                assert status == 200 and body == original
+                                assert headers.get("Content-Encoding") == expected, headers
+                        head_route = "/rooms/1?head-first=1"
+                        status, body, headers = request(head_route, method="HEAD", connection=conn)
+                        assert status == 200 and body == "" and "Content-Encoding" not in headers
+                        assert int(headers["Content-Length"]) == len(original.encode())
+                        status, body, headers = request(head_route, connection=conn)
+                        assert status == 200 and body == original and headers.get("Content-Encoding") == "gzip"
+                        assert headers["X-Campfire-Cache"] == "hit"
                         hidden = cookie(secret, "hidden-session")
                         assert request(route, credential=hidden, connection=conn)[0] == 404
                         assert request(route, credential=None, connection=conn)[0] == 302

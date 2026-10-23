@@ -141,28 +141,47 @@ void campfire_writer_leave(void) {
     writer_unlock();
 }
 
+static size_t campfire_timestamp_text(char text[40], const struct timespec *instant, int sql, int future, int seconds_ago) {
+    typedef struct { time_t second; size_t length; char prefix[32]; } timestamp_prefix;
+    static _Thread_local timestamp_prefix prefixes[6];
+    timestamp_prefix *prefix = &prefixes[sql + (future ? 2 : seconds_ago ? 4 : 0)];
+    time_t now = instant->tv_sec - seconds_ago;
+    // Only the calendar conversion is cached; fractions always use this clock sample.
+    if (!prefix->length || prefix->second != now) {
+        struct tm utc;
+#ifdef _WIN32
+        if (gmtime_s(&utc, &now)) return 0;
+#else
+        if (!gmtime_r(&now, &utc)) return 0;
+#endif
+        if (future) {
+            utc.tm_year += 20;
+            int year = utc.tm_year + 1900;
+            if (utc.tm_mon == 1 && utc.tm_mday == 29 && (year % 4 || (year % 100 == 0 && year % 400)))
+                utc.tm_mday = 28;
+        }
+        prefix->length = strftime(prefix->prefix, sizeof prefix->prefix,
+                                  sql ? "%Y-%m-%d %H:%M:%S" : "%Y-%m-%dT%H:%M:%S", &utc);
+        if (!prefix->length) return 0;
+        prefix->second = now;
+    }
+    size_t length = prefix->length;
+    memcpy(text, prefix->prefix, length);
+    text[length++] = '.';
+    int digits = sql ? 6 : 3;
+    long fraction = instant->tv_nsec / (sql ? 1000 : 1000000);
+    for (int i = digits; i > 0; --i) { text[length + i - 1] = '0' + fraction % 10; fraction /= 10; }
+    length += digits;
+    if (!sql) text[length++] = 'Z';
+    text[length] = 0;
+    return length;
+}
+
 static void campfire_timestamp(gs_rref out, int sql, int future, int seconds_ago) {
     struct timespec instant;
     if (!timespec_get(&instant, TIME_UTC)) return;
-    time_t now = instant.tv_sec - seconds_ago;
-    struct tm utc;
-#ifdef _WIN32
-    if (gmtime_s(&utc, &now)) return;
-#else
-    if (!gmtime_r(&now, &utc)) return;
-#endif
-    if (future) {
-        utc.tm_year += 20;
-        int year = utc.tm_year + 1900;
-        if (utc.tm_mon == 1 && utc.tm_mday == 29 && (year % 4 || (year % 100 == 0 && year % 400)))
-            utc.tm_mday = 28;
-    }
     char text[40];
-    size_t length = strftime(text, sizeof text, sql ? "%Y-%m-%d %H:%M:%S" : "%Y-%m-%dT%H:%M:%S", &utc);
-    int suffix = sql ? snprintf(text + length, sizeof text - length, ".%06ld", instant.tv_nsec / 1000)
-                     : snprintf(text + length, sizeof text - length, ".%03ldZ", instant.tv_nsec / 1000000);
-    if (suffix < 0 || (size_t)suffix >= sizeof text - length) return;
-    length += (size_t)suffix;
+    size_t length = campfire_timestamp_text(text, &instant, sql, future, seconds_ago);
     gs_bld_append(out, text, (int64_t)length);
 }
 

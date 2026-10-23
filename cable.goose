@@ -96,10 +96,16 @@ thread_fn cable_broker() {
             if !active {
                 let pending, exists = qpoll<Publication>();
                 if !exists { break; }
-                body.clear(); json::format_string(body, pending.body);
+                body.clear();
                 room = pending.room; reply = pending.reply; active = true;
+                var observed = false;
                 for &c in connections { c.enrolled = false; c.subscription = 0; c.offset = 0; }
-                for sub in subscriptions { if matches(sub) && connections[sub.connection].live { connections[sub.connection].enrolled = true; } }
+                for sub in subscriptions {
+                    if matches(sub) && connections[sub.connection].live {
+                        connections[sub.connection].enrolled = true; observed = true;
+                    }
+                }
+                if observed { json::format_string(body, pending.body); }
             }
             var remaining = false;
             for &c, ci in connections {
