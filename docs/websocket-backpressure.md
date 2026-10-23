@@ -1,11 +1,12 @@
 # Outbound WebSocket flow control
 
-The experimental application carries a checksum-pinned patch for this gap. The
-[upstream draft PR](https://github.com/kaitk/goose-http/pull/2) adds `after_drain` and
+The experimental application pins upstream including the
+[merged PR](https://github.com/kaitk/goose-http/pull/2), which adds `after_drain` and
 `DRAINED`, allowing a publisher to send one bounded batch per socket drain credit.
 All 60 package tests pass at both optimization levels. A mailbox publisher test
 stalls its reader, resumes, and verifies 32 MiB in exact order on both loops with
-no measurable RSS increase during the stall. See [patch details](../patches/README.md).
+no measurable RSS increase during the stall. The [current local patch](../patches/README.md)
+only optimizes emulated-ring sends; the drain API and fairness fix are upstream.
 The historical reproduction below describes sending without those credits.
 
 ## Reproduction
@@ -84,12 +85,13 @@ Switching to v0.5.4 or to the epoll loop alone does not resolve the reproduced i
 native WebSocket server could provide the missing flow control, but expands the non-Goose part of
 the application and is more work than repairing this specific package API.
 
-## Completed application work
+## Earlier application validation
 
 The final production image passed all 27 differential rendering cases and all 315 asset
 hash/MIME checks against each pinned reference, Rust and Jai e56ba63. Its fresh-storage container
 smoke test also passed, including HTTP_PORT, schema creation, first-run setup and room rendering. The first-run implementation additionally passes fresh-schema
 creation, concurrent administrator setup, signed sessions, bcrypt login, invitation membership,
 invalid-origin rejection and duplicate-user rollback. Existing integration tests pass with response
-caching both enabled and disabled. Full browser parity and current Rust/Jai benchmarking are still
-pending; historical results against Jai e56ba63 do not establish a lead over 2ecd487.
+caching both enabled and disabled. At that checkpoint, browser parity and current Rust/Jai
+benchmarking were pending. The [current report](send-copy.md) records those completed checks;
+historical results against Jai e56ba63 do not establish a lead over 2ecd487.

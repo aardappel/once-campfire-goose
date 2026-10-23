@@ -4,7 +4,8 @@ HTTP is pinned to upstream `ebb4238728179e82140550af50e5bab1a7e0dab2`, which
 includes the merged [drain and fairness PR](https://github.com/kaitk/goose-http/pull/2).
 The previous drain patch is no longer needed.
 
-`goose-http-send-copy.patch` is a local experiment against that revision.
+`goose-http-send-copy.patch` is local commit `6f6e7d80e58d689b5f33a08af26c428739f96642`
+against that revision. It has not been submitted upstream.
 `dependencies.json` pins its SHA-256 and resulting Git tree. Bootstrap accepts
 only that exact tree and rejects changes to patched files.
 
@@ -21,3 +22,8 @@ sanitizers and Clang pass. All 60 package tests pass at `-O0` and `-O2` with Goo
 v2026.3. Both Unix loops pass the 32 MiB stalled-reader delivery, disconnect reuse,
 direct-publisher fairness and active-connection deadline tests on Linux/WSL2.
 Native io_uring, macOS and Windows integration remain unmeasured here.
+
+The application also passes the full native test matrix, shared Chromium suite,
+27 rendering comparisons per reference, and all 315 asset checks. The completed
+[benchmark report](../docs/send-copy.md) records the controlled CPU reduction,
+throughput variation, and current Rust/Jai comparison.

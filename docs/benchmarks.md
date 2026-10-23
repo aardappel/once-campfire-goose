@@ -1,4 +1,8 @@
-# Current Rust/Jai comparison
+# Earlier Rust/Jai comparison
+
+The [send-copy report](send-copy.md) supersedes these results with the merged HTTP
+dependency, the local send optimization, and completed baseline and mixed benchmarks.
+This page retains the earlier measurements and shared reproduction instructions.
 
 Measured on 2026-10-23 UTC using the packaged Goose application and current published
 Rust and Jai images. The older Jai `e56ba63` comparison in [the experiment log](experiment.md)
