@@ -49,8 +49,10 @@ The build pins upstream goose-http including the merged
 The application uses these credits to bound WebSocket output when readers stall.
 A local checksum-pinned patch tries sends of at least 16 KiB on writable sockets in the
 emulated ring, retaining owned partial writes and deferred drain completions. It is under
-review in [draft PR #3](https://github.com/kaitk/goose-http/pull/3); a small-response
-throughput concern remains under investigation.
+review in [draft PR #3](https://github.com/kaitk/goose-http/pull/3). The review finds
+a 13-28% server-bound throughput loss, so the patch is retained only as an experiment,
+pending a decision to retire it. It is not recommended for merge. The current pin
+includes upstream's native-ring allocation fix and goose-compress v0.1.3.
 See the [patch pin](patches/README.md) and [reproducer](docs/websocket-backpressure.md).
 
 ## Verification and provenance
@@ -68,9 +70,11 @@ The cached-read medians are 11-16% above Jai and posts 60% above it. Mixed reads
 to another room reach 209k/s, versus Jai's 182k/s. Anonymous memory sampled after writes
 is 28.5 MiB, versus 108.3 MiB for Jai and 93.1 MiB for Rust. That comparison predates the
 16 KiB floor and is not a measurement of the current patch. The
-[current candidate's five-pair A/B](docs/send-copy-pr.md) reduces median room-read CPU time
+[historical thresholded five-pair A/B](docs/send-copy-pr.md) reduces median room-read CPU time
 by 4.0%, with a 7.6% throughput increase and overlapping ranges. Its separate pipelined
-plaintext comparison remains 8.5% slower in median throughput. These HTTP workloads have
+plaintext comparison remains 8.5% slower in median throughput. The maintainer's later
+server-bound review overturns the case for this transport change; these figures do
+not measure the current dependency pins. These HTTP workloads have
 no live subscribers and limited generator headroom; they do not measure full application
 or broadcast capacity. Reports include individual samples and limitations.
 

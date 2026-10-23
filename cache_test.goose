@@ -1,6 +1,6 @@
 import std;
-import http from "github.com/kaitk/goose-http@df12a627c9f4df51465f1ac7c324c17e86dc78b3";
-import compress from "github.com/kaitk/goose-compress@v0.1.1";
+import http from "github.com/kaitk/goose-http@75f0362919dd7140bc672f4cbecfb69033c500fc";
+import compress from "github.com/kaitk/goose-compress@v0.1.3";
 import cache;
 
 fn main() {

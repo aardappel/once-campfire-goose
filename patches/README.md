@@ -1,13 +1,21 @@
 # Pinned HTTP send optimization
 
-HTTP is pinned to upstream `df12a627c9f4df51465f1ac7c324c17e86dc78b3`, which
-includes the merged [drain and fairness PR](https://github.com/kaitk/goose-http/pull/2).
-The previous drain patch is no longer needed.
+HTTP is pinned to upstream `75f0362919dd7140bc672f4cbecfb69033c500fc`, which
+includes the merged [drain and fairness PR](https://github.com/kaitk/goose-http/pull/2),
+the native io_uring send-allocation fix, and goose-compress v0.1.3.
 
-`goose-http-send-copy.patch` is local commit `a12328478b48efd9ea6adb2038e3f185fc130651`
-against that revision, submitted as [draft PR #3](https://github.com/kaitk/goose-http/pull/3).
-The PR also contains benchmark records; this pin carries its functional changes.
-Retain the pinned patch until the upstream merge is incorporated into the dependency lock.
+`goose-http-send-copy.patch` contains the functional changes through
+`65bbcf71f1a3f203def7e52ebf909f702a70d81f` against that revision, submitted as
+[draft PR #3](https://github.com/kaitk/goose-http/pull/3). The PR also contains
+benchmark records; this pin carries its functional changes. Both fixture close
+calls pass the new receive tag argument.
+
+The [2026-10-23 review](https://github.com/kaitk/goose-http/pull/3#issuecomment-6371183040)
+finds a 13-28% server-bound throughput loss and reproduces the apparent gain only
+with a saturated client. The patch is retained under the experiment's existing
+pinning instruction, pending a decision to retire it. It is not recommended for
+upstream merge. If retained and eventually merged, replace it with the immutable
+upstream revision in the dependency lock.
 `dependencies.json` pins its SHA-256 and resulting Git tree. Bootstrap accepts
 only that exact tree and rejects changes to patched files.
 
@@ -26,8 +34,7 @@ v2026.3. Both Unix loops pass the 32 MiB stalled-reader delivery, disconnect reu
 direct-publisher fairness and active-connection deadline tests on Linux/WSL2.
 Native io_uring, macOS and Windows integration remain unmeasured here.
 
-The application also passes the full native test matrix, shared Chromium suite,
-27 rendering comparisons per reference, and all 315 asset checks. The completed
-[review report](../docs/send-copy-pr.md) records the thresholded candidate's CPU
-reduction and the remaining plaintext throughput concern. The earlier full Rust/Jai
-comparison used the all-size prototype and remains separately identified.
+The [review report](../docs/send-copy-pr.md) separates the original measurements,
+the maintainer's server-bound findings, and validation of the rebased candidate.
+The earlier full Rust/Jai comparison used the all-size prototype and remains
+separately identified. Neither comparison measures the current compression update.

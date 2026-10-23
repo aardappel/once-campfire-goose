@@ -1,24 +1,6 @@
-diff --git a/docs/decisions.md b/docs/decisions.md
-index 67a7452..98fbdb7 100644
---- a/docs/decisions.md
-+++ b/docs/decisions.md
-@@ -109,6 +109,13 @@ nothing queued on its socket first tries synchronous `send(2)`; only unsent byte
- need a retained copy. Smaller sends stay asynchronous because a syscall per response
- cost small REST responses throughput.
- 
-+The readiness-based emulation (2026-10-22, task 064) tries sends of at least
-+16 KiB when the socket is writable and has no queued send. Small sends remain
-+queued: immediate output wakes clients while the loop is still processing a
-+pipelined receive, and the all-size experiment lost plaintext throughput.
-+The ring owns the unsent tail before returning and reports even a complete
-+inline send from `ur_wait`. Native io_uring retains the 64 KB threshold.
-+
- ## Files of 64 KB or more go to the loop
- 
- Decided 2026-10-12, task 020.
 diff --git a/scripts/fixtures/ring_send.c b/scripts/fixtures/ring_send.c
 new file mode 100644
-index 0000000..b49a5f3
+index 0000000..27cad11
 --- /dev/null
 +++ b/scripts/fixtures/ring_send.c
 @@ -0,0 +1,187 @@
@@ -155,11 +137,11 @@ index 0000000..b49a5f3
 +    assert(RP(wait)(h, (rp_completions){&c, 1}, 0) == 1);
 +    expect(c, 32, -32);
 +    assert(RP(send)(h, 7, 33, (rp_bytes){a, sizeof a}) == 0);
-+    RP(close)(h, 7);
++    RP(close)(h, 7, 0);
 +    assert(RP(wait)(h, (rp_completions){&c, 1}, 0) == 0);
 +    outcomes[3] = -RP_EAGAIN; outcome_count = 4;
 +    assert(RP(send)(h, 7, 34, (rp_bytes){a, sizeof a}) == 0);
-+    RP(close)(h, 7);
++    RP(close)(h, 7, 0);
 +    assert(RP(wait)(h, (rp_completions){&c, 1}, 0) == 0);
 +    RP(destroy)(h);
 +}
@@ -210,10 +192,10 @@ index 0000000..b49a5f3
 +    puts("ring send ownership, ordering, backpressure, and completion tests passed");
 +}
 diff --git a/scripts/test-drain.sh b/scripts/test-drain.sh
-index ab26377..ec97eb5 100644
+index c9a07cf..1619e37 100644
 --- a/scripts/test-drain.sh
 +++ b/scripts/test-drain.sh
-@@ -3,6 +3,10 @@
+@@ -4,6 +4,10 @@
  set -eu
  root=$(cd "$(dirname "$0")/.." && pwd)
  . "$root/scripts/goose.sh"
@@ -225,7 +207,7 @@ index ab26377..ec97eb5 100644
      "$root/scripts/fixtures/drain_turns.goose"
  python3 "$root/scripts/test-drain-turns.py" "$root/build/drain-turns"
 diff --git a/shim/ring_epoll.c b/shim/ring_epoll.c
-index 57c7f7f..31c36d1 100644
+index 184c2b4..d7701a1 100644
 --- a/shim/ring_epoll.c
 +++ b/shim/ring_epoll.c
 @@ -10,8 +10,9 @@

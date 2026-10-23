@@ -1,14 +1,61 @@
 # Send-copy upstream review
 
-[Upstream PR #3](https://github.com/kaitk/goose-http/pull/3) contains the optimization,
-deterministic tests, individual benchmark samples and package reproduction commands.
-It is a draft because a plaintext throughput difference remains unresolved.
+[Upstream PR #3](https://github.com/kaitk/goose-http/pull/3) remains a draft. The
+[2026-10-23 review](https://github.com/kaitk/goose-http/pull/3#issuecomment-6371183040)
+finds a 13-28% throughput loss on server-bound 21 KiB responses. Its double-copy
+control has no measurable cost, and it reproduces the Campfire-style gain only
+when the client is saturated. The evidence does not support merging this send path.
 
 The application continues carrying a checksum/tree-pinned functional patch through
-`a12328478b48efd9ea6adb2038e3f185fc130651` on upstream
-`df12a627c9f4df51465f1ac7c324c17e86dc78b3`. Keep it until the upstream merge is
-incorporated into the dependency lock. The PR's additional benchmark documentation
-does not change the functional patch. Nothing has been landed on Goose master.
+`65bbcf71f1a3f203def7e52ebf909f702a70d81f` on upstream
+`75f0362919dd7140bc672f4cbecfb69033c500fc`, under the existing experiment instruction,
+pending a decision to retire it. The rebase includes goose-compress v0.1.3 and the
+native io_uring allocation fix. Application compression imports use the same v0.1.3
+pin. The fixture now passes the receive tag to both close calls. Nothing has been
+landed on Goose master.
+
+## Local native io_uring requirements
+
+The local host runs WSL 2.4.13.0 with Linux 5.15.167.4. A disposable C probe using
+liburing gives these results on 2026-10-23:
+
+| Container policy | Basic ring | goose-http setup flags |
+|---|---|---|
+| Docker default | EPERM | EPERM |
+| Seccomp disabled for this probe | Available | EINVAL |
+
+goose-http requires Linux 6.1 or later for multishot receive, provided buffer rings,
+and deferred task running. Its flags are `SINGLE_ISSUER`, `DEFER_TASKRUN`, and
+`SUBMIT_ALL`. Allowing syscalls cannot supply the missing kernel features.
+
+The next native experiment needs a WSL update (`wsl --update`), a scheduled WSL
+restart, and a check of `uname -r` inside Docker. Restarting WSL interrupts other
+Linux processes, so this session leaves the installed kernel unchanged. On a
+suitable kernel, extend Docker's default seccomp profile to allow
+`io_uring_setup`, `io_uring_enter`, and `io_uring_register`, then pass that profile
+with `--security-opt seccomp=/absolute/path/profile.json`. The unrestricted probe
+above is diagnostic, not the deployment configuration.
+
+Before timing native io_uring, confirm the startup log selects it and rerun the
+delivery, acknowledged-write and browser tests. Compare against two independent
+base builds, increase client capacity until server saturation is demonstrated, and
+record total server CPU per validated response. A kernel change requires rerunning
+Rust and Jai on the same machine; historical numbers are not comparable to a
+new-kernel run. Sources: [HTTP shim requirements](https://github.com/kaitk/goose-http/blob/75f0362919dd7140bc672f4cbecfb69033c500fc/shim/uring.c),
+[Docker seccomp](https://docs.docker.com/engine/security/seccomp/), and
+[WSL update commands](https://learn.microsoft.com/en-us/windows/wsl/basic-commands#update-wsl).
+
+## Rebase validation
+
+GCC address/undefined-behavior sanitizers and all 60 HTTP package tests at `-O0` and
+`-O2` pass with official Goose v2026.3 and Clang 18.1.3. Both Linux loops pass the
+32 MiB stalled-reader test, disconnect reuse, publisher fairness and active deadline
+checks. The native io_uring fixture explicitly skips on this host. These checks do
+not establish a performance benefit. The application test image passes its full
+native matrix: setup/authentication, both HTTP backends with caching on and off,
+rollback and 32 concurrent acknowledged writes, revocation/WAL recovery, fragmented
+WebSocket delivery and disconnect cleanup, renderer units and compiler reproducers.
+Production-image, browser and differential rendering checks are pending completion.
 
 ## Size threshold and remaining concern
 
@@ -28,7 +75,7 @@ per connection. Each sample checks ten million plaintext responses as 2xx. Three
 before/after pairs and three reversed-order pairs run without competing builds or
 observed host processes averaging above 0.3 cores. Both versions use the emulated ring.
 
-## Current application A/B
+## Historical thresholded application A/B
 
 Measured on October 22, 2026, around 23:20-23:25 PDT, on the Ryzen 9 9950X3D,
 Docker/WSL2 Linux 5.15.167.4 and glibc 2.39. Five pairs alternate the preserved
@@ -44,7 +91,7 @@ fixed request batch, including idle time around it. No compiler jobs run during
 timing; brief browser activity is retained in the host logs. The generator remains
 near its CPU limit, so this is not a maximum-capacity measurement.
 
-| Median metric | Before | Current candidate | Change |
+| Median metric | Before | Thresholded candidate | Change |
 |---|---:|---:|---:|
 | User-mode cycles/response | 9,218.6 | 8,351.7 | -9.4% |
 | Total server CPU microseconds/response | 8.454 | 8.115 | -4.0% |
@@ -52,8 +99,9 @@ near its CPU limit, so this is not a maximum-capacity measurement.
 
 User-cycle cost improves in all five pairs, total CPU time in three, and throughput
 in four. Before throughput spans 205,543-236,734; after spans 220,747-251,441. The
-ranges overlap, and one pair loses 2.8% throughput. The strongest evidence is the
-repeated user-cycle reduction for this workload. The small-response tradeoff remains.
+ranges overlap, and one pair loses 2.8% throughput. The user-cycle reduction describes
+this client-limited setup; the later server-bound review overturns the case for
+treating it as a general transport optimization.
 
 The exact candidate passes the full native application test image, both HTTP backends,
 shared Chromium smoke suite, 27 differential rendering cases against each reference,
@@ -65,7 +113,7 @@ The HTTP package passes sanitizers, all 60 tests at both optimization levels, an
 Current Rust/Jai throughput was not rerun for this candidate. The
 [earlier full comparison](send-copy.md) explicitly identifies its all-size prototype.
 
-## Provenance
+## Historical A/B provenance
 
 ```text
 Application: aea9508ac3f3eadd5925f22d64e712ff8fa3a757

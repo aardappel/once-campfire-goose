@@ -1,9 +1,10 @@
 # Earlier HTTP send-copy experiment
 
-This report measures the all-size prototype at `38099a8`. The current patch has a
-16 KiB floor after a pipelined-plaintext regression was found during upstream PR
-preparation. See the [upstream review and new A/B](send-copy-pr.md). The Rust/Jai
-throughput numbers below have not been rerun for that thresholded version.
+This report measures the all-size prototype at `38099a8`. The later upstream review
+finds a 13-28% server-bound throughput loss and reproduces the gain only with a
+saturated client. See the [review and local runtime requirements](send-copy-pr.md).
+The Rust/Jai throughput numbers below have not been rerun for the thresholded
+version or the current compression update.
 
 Measured on 2026-10-23 UTC. The experimental application uses merged upstream HTTP
 drain support plus a local optimization that avoids copying bytes accepted immediately
@@ -12,7 +13,8 @@ by a writable socket. It retains owned unsent bytes and deferred completions.
 Goose leads the current published Jai image by 11-16% on the four cached-read medians,
 60% on posts, and 15% on mixed reads/writes in this comparison. This is a fixed-workload
 application comparison, not a language-wide or maximum-capacity claim. The separate A/B
-supports retaining the optimization for lower user-mode CPU cost, with variable throughput.
+shows lower user-mode CPU cost in a client-limited setup, with variable throughput;
+the later server-bound review does not support merging this optimization.
 
 ## Controlled before/after result
 

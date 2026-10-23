@@ -1,5 +1,5 @@
 import std;
-import http from "github.com/kaitk/goose-http@df12a627c9f4df51465f1ac7c324c17e86dc78b3";
+import http from "github.com/kaitk/goose-http@75f0362919dd7140bc672f4cbecfb69033c500fc";
 
 thread_fn worker(cfg: http::Config) {
     let error = http::serve(cfg) { req, body, out =>
