@@ -7,12 +7,12 @@
     {
       "name": "http",
       "repository": "https://github.com/kaitk/goose-http.git",
-      "ref": "a7ce7d123d921a1f89520f8841f47caba68f1096",
-      "revision": "a7ce7d123d921a1f89520f8841f47caba68f1096",
+      "ref": "ebb4238728179e82140550af50e5bab1a7e0dab2",
+      "revision": "ebb4238728179e82140550af50e5bab1a7e0dab2",
       "patch": {
-        "file": "patches/goose-http-drain.patch",
-        "sha256": "9fdb1acf284d316a1a802308e60a01f27adc3c6995b08fd2193eb91faf9a91b6",
-        "tree": "c778536c123c843834d2cbead6ecfc63c41f2b50"
+        "file": "patches/goose-http-send-copy.patch",
+        "sha256": "440c300443c0b2a5c88a15e05aea3769c1188e846252f8e2a5a7f50b7cdf2303",
+        "tree": "21ac01a388175e61614d624107f5f870b635f23f"
       }
     },
     {
