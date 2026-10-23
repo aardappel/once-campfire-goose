@@ -36,6 +36,10 @@ suitable kernel, extend Docker's default seccomp profile to allow
 with `--security-opt seccomp=/absolute/path/profile.json`. The unrestricted probe
 above is diagnostic, not the deployment configuration.
 
+The existing `CAMPFIRE_HTTP_BACKEND=epoll` option works on this kernel and bypasses
+the experimental ring send path. Its delivery tests pass; this session does not
+measure its performance against the emulated or native rings.
+
 Before timing native io_uring, confirm the startup log selects it and rerun the
 delivery, acknowledged-write and browser tests. Compare against two independent
 base builds, increase client capacity until server saturation is demonstrated, and
@@ -55,9 +59,22 @@ not establish a performance benefit. The application test image passes its full
 native matrix: setup/authentication, both HTTP backends with caching on and off,
 rollback and 32 concurrent acknowledged writes, revocation/WAL recovery, fragmented
 WebSocket delivery and disconnect cleanup, renderer units and compiler reproducers.
-Production-image, browser and differential rendering checks are pending completion.
+The production-image smoke test, unmodified shared Chromium suite, 27 differential
+rendering cases against each pinned Rust/Jai reference, and all 315 asset checks
+also pass. No performance benchmark is rerun for the new dependency pins.
 
-## Size threshold and remaining concern
+The validated application source is `4cbb4e61ea4c149488224e3c8c07bff92dc803d4`.
+The image is `sha256:13f474fd95899885e41e5cb9f31e5f7cd0defd7e8259ec3855450f7a295319b7`;
+its executable SHA-256 is
+`857a5def236ee3d61f6be8b190a0efe671852cfcbce7ab888a32f92f22d7932d`.
+The functional patch SHA-256 is
+`396a9d66f0fa2b1c98951890ff65dee1c4dec7b1348fe4f0dbdbcb0f8652f271`, producing tree
+`7f5f5399cddf0752813d7efeb4218de87c03cea2`. Raw logs stay ignored under
+`build/send-review-*` and `build/browser-send-review`. The
+[PR reply](https://github.com/kaitk/goose-http/pull/3#issuecomment-6373693810)
+records the fix, the review outcome and the local blocker.
+
+## Historical size-threshold concern
 
 Pre-submission testing found that the original all-size fast path loses 25.5% median
 throughput on heavily pipelined plaintext. The submitted candidate keeps sends below
@@ -110,7 +127,7 @@ writes, session/room revocation, WAL restart, fragmented fan-out and disconnect 
 The HTTP package passes sanitizers, all 60 tests at both optimization levels, and
 32 MiB stalled-reader delivery, disconnected-slot reuse and publisher fairness.
 
-Current Rust/Jai throughput was not rerun for this candidate. The
+Rust/Jai throughput was not rerun for this thresholded candidate. The
 [earlier full comparison](send-copy.md) explicitly identifies its all-size prototype.
 
 ## Historical A/B provenance
