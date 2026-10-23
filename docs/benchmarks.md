@@ -1,53 +1,110 @@
 # Current Rust/Jai comparison
 
-Measured on 2026-10-22 using the packaged Goose application and current published
+Measured on 2026-10-23 UTC using the packaged Goose application and current published
 Rust and Jai images. The older Jai `e56ba63` comparison in [the experiment log](experiment.md)
 is historical and does not establish a 2x lead over current Jai.
 
 ## Results
 
-Goose leads current Jai on the observed medians: 5-9% on the four cached-read routes,
-4% on reads alongside a paced writer, and 61% on posts. Against Rust, room reads are
-7.26x and posts 2.06x. This is a narrower lead over Jai than the historical comparison.
+Goose's observed medians are 1-4% above current Jai on the four cached-read routes
+and 55% above it on posts. The read ranges overlap, so they do not establish a large
+or consistent read-throughput advantage. Against Rust, room reads are 6.88x and posts
+2.00x. The controlled before/after experiment below shows reduced server CPU cost,
+but the primary benchmark does not establish that these changes widened the Jai gap.
 
 Valid requests/second, median of three rounds; parentheses show the lowest and highest
-round, not a confidence interval. Measurement ran from 23:32:22 to 23:42:33 UTC.
+round, not a confidence interval. Baseline measurement and audits ran from 01:44:31
+to 01:52:47 UTC. These nine runs finished before an unrelated Windows build began.
+The subsequent mixed-workload samples overlapped compilation and are excluded.
+A mixed-only retry also overlapped another build; refreshed mixed results remain pending.
 
 | Route | Goose | Rust | Jai |
 |---|---:|---:|---:|
-| Room | 208,102 (202,864-218,122) | 28,655 (27,851-28,940) | 190,998 (185,664-193,029) |
-| Older messages | 208,953 (207,771-213,554) | 28,171 (27,764-28,179) | 198,163 (194,816-198,910) |
-| Sidebar | 217,529 (213,354-232,134) | 30,214 (29,877-30,581) | 201,882 (200,307-203,021) |
-| Search | 210,045 (204,979-219,156) | 29,828 (29,796-30,586) | 200,780 (195,612-201,157) |
-| Post message | 8,505 (8,198-8,914) | 4,129 (3,819-4,145) | 5,298 (5,265-5,350) |
-| Room + 10 posts/s | 196,776 (195,752-214,377) | 27,544 (26,174-27,554) | 189,051 (187,245-189,941) |
+| Room | 192,362 (190,631-205,325) | 27,944 (27,821-28,165) | 186,750 (178,442-188,209) |
+| Older messages | 196,989 (182,211-205,508) | 27,588 (27,405-27,693) | 191,307 (184,165-192,094) |
+| Sidebar | 201,558 (166,934-203,032) | 30,102 (29,538-30,587) | 193,742 (188,090-197,829) |
+| Search | 196,635 (185,472-210,914) | 30,202 (29,981-30,447) | 194,062 (176,240-197,935) |
+| Post message | 8,081 (7,939-8,375) | 4,045 (3,990-4,070) | 5,211 (5,128-5,352) |
 
 Median anonymous-memory samples after each route, in MiB:
 
 | Sample | Goose | Rust | Jai |
 |---|---:|---:|---:|
-| Room reads | 23.61 | 22.77 | 45.97 |
-| Message posts | 28.32 | 92.01 | 104.96 |
-| Room reads + paced writes | 24.59 | 73.94 | 87.75 |
+| Room reads | 23.45 | 22.38 | 45.96 |
+| Message posts | 27.20 | 92.52 | 109.63 |
 
 Goose is close to Rust's memory use on room reads and substantially lower after writes.
-The median of the per-round POST p99 latencies is 6.17 ms for Goose, 9.04 ms for Rust,
-and 7.52 ms for Jai. Room-read p99 is approximately 0.190, 1.177, and 0.186 ms,
+The median of the per-round POST p99 latencies is 6.42 ms for Goose, 8.95 ms for Rust,
+and 7.67 ms for Jai. Room-read p99 is approximately 0.194, 1.201, and 0.188 ms,
 respectively; higher Goose throughput does not imply lower latency on every route.
 
-The generator uses about 3.70 CPU cores for Goose room reads and 3.75 for Jai, out of
-four allocated client cores; the servers use about 1.77 and 1.94 cores. This indicates
+The generator uses about 3.71 CPU cores for Goose room reads and 3.74 for Jai, out of
+four allocated client cores; the servers use about 1.72 and 1.95 cores. This indicates
 limited generator headroom, so these results should not be extrapolated to maximum
-server throughput. Rust uses about 3.31 server cores and 1.15 generator cores there.
+server throughput. Rust uses about 3.32 server cores and 1.14 generator cores there.
 
 All timed responses passed their route contracts, with zero errors or invalid responses.
 The completed audit totals are:
 
-| Application | Valid timed responses, including mixed writes | Audited acknowledged writes, including warmup |
+| Application | Valid timed baseline responses | Audited acknowledged writes, including warmup |
 |---|---:|---:|
-| Goose | 25,515,588 | 248,817 |
-| Rust | 3,551,190 | 117,157 |
-| Jai | 23,574,648 | 159,474 |
+| Goose | 18,897,958 | 240,109 |
+| Rust | 2,877,004 | 116,304 |
+| Jai | 18,278,658 | 156,864 |
+
+## Profile-guided optimization
+
+The original production binary was profiled with `perf record -e cycles:u -F 499`
+and DWARF call chains, using the unchanged shared load generator and route contracts.
+The read profile attributed 22% of sampled cycles to copying, including roughly 18%
+in cached-response and send-buffer copies. UTC conversion, timestamp formatting and
+repeated compression negotiation were other visible costs. The write profile showed
+substantial gzip work and 3.35% in the broker's JSON string formatting.
+
+Application revision `af65824` makes three changes:
+
+- Cache the calendar portion of timestamp formatting per thread and second, retaining
+  a fresh clock sample and its exact milliseconds or microseconds on every call.
+- Store the negotiated compression type in page-cache entries. Exact header bytes
+  remain part of the key; HEAD still uses the identity body's length and sends no body.
+- Encode broadcast JSON only when a publication has matching subscribers. The broker
+  still performs its ordinary enrollment, completion and acknowledgement processing.
+
+Tests cover timestamp fractions, backward clock jumps, date boundaries, leap-day expiry
+and independent threads, plus alternating encodings and HEAD-before-GET cache fills.
+Authentication, WAL certification, SQL transactions and live-delivery rules are unchanged.
+
+A separate before/after comparison alternated the preserved `2399a6bd` image and the
+new image three times, using 600,000 validated room reads per sample, 16 connections,
+the same four server and four client cores, and fresh seed copies. After warmup,
+`perf stat -e instructions:u,cycles:u,task-clock -p 1 -- sleep 10` counted all server
+threads; the fixed request batch ran entirely inside that interval. Thus task-clock
+includes the surrounding idle time. All 3.6 million measured responses passed. No
+Windows compiler process was detected during these samples.
+
+| Median metric | Before | After | Change |
+|---|---:|---:|---:|
+| User-mode instructions / response | 13,678 | 7,833 | -42.7% |
+| User-mode cycles / response | 12,174 | 9,492 | -22.0% |
+| Total server CPU microseconds / response | 9.28 | 8.63 | -6.9% |
+| Valid responses / second | 200,097 | 211,435 | +5.7% |
+
+Before throughput ranged from 197,779 to 200,783; after ranged from 209,142 to 215,770.
+These are controlled Goose-versus-Goose results, not a replacement for the Rust/Jai
+comparison or evidence of a 43% throughput increase. Absolute rates from different
+sessions are not used to attribute code gains.
+
+An isolated 2,000-iteration compression probe of a rendered POST response supported
+retaining gzip level 1: 2,112 bytes / 20.9 microseconds, versus level 3's 2,055 bytes /
+24.4 microseconds and level 6's 1,998 bytes / 30.4 microseconds. This is encoder cost,
+not end-to-end POST latency. The existing reset API also clears the large encoder arrays,
+so allocation reuse alone does not remove that work.
+
+The next investigations are avoiding a response-buffer copy in goose-http while preserving
+partial-write ownership and drain semantics, and separating generator limits from server
+capacity with independent client processes. The latter check and refreshed mixed-workload
+measurements need a quiet host; no results are claimed for either. No competing processes
+were interrupted. The remaining uncontended read ranges still show substantial variation.
 
 ## What was validated
 
@@ -120,7 +177,7 @@ drain integration remain upstream release checks.
 
 | Input | Revision |
 |---|---|
-| Goose application | `2399a6bd22df33ecae0b751525f89859fd2d023a` |
+| Goose application | `af65824e896a496b4b685d7a692e298a7abc1106` |
 | Goose compiler | `d9573d8139de395cd4549b876c176c25eb878fc1` |
 | Rust application | `6dae2fd3c1a2dce61ca11beb731bcce2b42b67ad` |
 | Jai published image tag | `2ecd487` |
@@ -131,12 +188,14 @@ Rust's image revision matches current source main. Jai's current source main is
 `b0952a20541fadda3ac0eb7991e9d75acca25799`; its changes after the published `2ecd487`
 are documentation only. Jai's image does not carry a revision label, so its association
 with that tag comes from the published image and [upstream submission](https://github.com/basecamp/once-campfire-verification/pull/11).
-The digest below is the exact artifact measured. References were rechecked on 2026-10-22.
+The digest below is the exact artifact measured. Source references were rechecked on 2026-10-23 UTC.
 
 | Artifact | SHA-256 |
 |---|---|
-| Goose local image ID | `7d279f50d36a1719b088f33edcc80b13abec04ad6736f38a3fbd79253189083c` |
-| Goose executable | `27dddc1ea704c640ae0e0d8daaafd1d60699e1a6ae3ef14f6ecce3da90061af0` |
+| Goose local image ID | `81c9d6cfa78a20df7b0bcec8327bcd4c70fcf6d4faf4a17b3fb9e6a2b4841a45` |
+| Goose executable | `4272e14810ef82104b617acc90fb6e41dca9487312820c26c6dcf6d0d4b104a3` |
+| A/B before Goose image ID | `7d279f50d36a1719b088f33edcc80b13abec04ad6736f38a3fbd79253189083c` |
+| A/B before Goose executable | `27dddc1ea704c640ae0e0d8daaafd1d60699e1a6ae3ef14f6ecce3da90061af0` |
 | Rust GHCR image digest | `98ba156f688c3fe856afd71655f613a6620bc03754f456ed2ef08fb2e5527e6e` |
 | Jai GHCR image digest | `bbbe5c642001c653906dbe4d6f6d584090b82b352724c77d5f134a081506829e` |
 | Shared load generator | `f4e5801a7b5ff6ba1a1b8919a007f7d409e79c2f88433299c944c424aa24aecb` |

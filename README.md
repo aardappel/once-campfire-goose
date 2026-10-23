@@ -58,11 +58,14 @@ the unchanged shared load generator and validators, and audited writes. It recor
 memory, exact versions, and workload limits. The old Jai `e56ba63` measurements do not describe
 the current `2ecd487` comparison. See [cache validation](docs/read-cache.md) for the read path.
 
-On the recorded four-core server allocation, Goose's three-round medians are 208k room
-reads/s and 8.5k posts/s, versus current Jai's 191k and 5.3k, and Rust's 28.7k and 4.1k.
-Anonymous memory sampled after writes is 28.3 MiB, versus 105.0 MiB for Jai and 92.0 MiB
-for Rust. These HTTP workloads have no live subscribers; they do not measure full application
-or broadcast capacity. The report includes ranges and remaining compatibility work.
+On the recorded four-core server allocation, Goose's three-round medians are 192k room
+reads/s and 8.1k posts/s, versus current Jai's 187k and 5.2k, and Rust's 27.9k and 4.0k.
+The read ranges overlap; the post median is 55% above Jai. Anonymous memory sampled after
+writes is 27.2 MiB, versus 109.6 MiB for Jai and 92.5 MiB for Rust. A controlled optimization
+A/B reduced room-read CPU time by 7% and increased throughput by 6%. These HTTP workloads
+have no live subscribers; they do not measure full application or broadcast capacity.
+Refreshed mixed-workload timings remain pending because unrelated builds overlapped them.
+The report includes ranges, provenance and remaining compatibility work.
 
 Application source was extracted from `aardappel/goose` revision
 `9bbf9446` (`bench/campfire`) onto the experimental branch. The Goose compiler remains a separate dependency.

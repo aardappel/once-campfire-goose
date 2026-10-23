@@ -4,6 +4,9 @@ Each HTTP worker owns its page cache. Entries store the authenticated user ID, e
 target and complete header bytes, followed by the plain and gzip bodies. Comparing the two
 request slices directly avoids allocating a formatted key on a hit. Different headers may
 cause extra misses; they cannot accidentally select another request's cached response.
+Entries also retain their negotiated compression type: identical header bytes have the
+same negotiation result. HEAD always suppresses the body and uses its identity length,
+including when a HEAD request populated the cache before a GET.
 
 Cached pages use gzip level 6. For the measured room, this produces 20,877 bytes instead of
 level 1's 28,522. A ten-iteration encoding probe measured approximately 0.82 ms versus
@@ -28,6 +31,10 @@ same authenticated cookie, an unexpired signed-cookie timestamp, and an exact ca
 Changed, unavailable or inconsistent WAL state goes through SQL again. Unknown WAL layouts
 disable this path. The certificate never authorizes a newly seen request or extends a cookie's
 expiry. SQLite's locking and write durability settings are unchanged.
+
+The clock adapter caches only the formatted calendar prefix within each second, per thread.
+Every call still samples the clock and formats its current fractional time. Signed-cookie
+expiry therefore retains millisecond precision, including within a single cached second.
 
 The design follows SQLite's `walIndexTryHdr` protocol; Jai's published
 [WAL generation check](https://github.com/lucasmeijer/once-campfire-jai/blob/2ecd487/src/framework/db/database.jai)
