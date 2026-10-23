@@ -1,4 +1,9 @@
-# HTTP send-copy experiment
+# Earlier HTTP send-copy experiment
+
+This report measures the all-size prototype at `38099a8`. The current patch has a
+16 KiB floor after a pipelined-plaintext regression was found during upstream PR
+preparation. See the [upstream review and new A/B](send-copy-pr.md). The Rust/Jai
+throughput numbers below have not been rerun for that thresholded version.
 
 Measured on 2026-10-23 UTC. The experimental application uses merged upstream HTTP
 drain support plus a local optimization that avoids copying bytes accepted immediately

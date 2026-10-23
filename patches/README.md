@@ -5,7 +5,9 @@ includes the merged [drain and fairness PR](https://github.com/kaitk/goose-http/
 The previous drain patch is no longer needed.
 
 `goose-http-send-copy.patch` is local commit `a12328478b48efd9ea6adb2038e3f185fc130651`
-against that revision. It has not been submitted upstream.
+against that revision, submitted as [draft PR #3](https://github.com/kaitk/goose-http/pull/3).
+The PR also contains benchmark records; this pin carries its functional changes.
+Retain the pinned patch until the upstream merge is incorporated into the dependency lock.
 `dependencies.json` pins its SHA-256 and resulting Git tree. Bootstrap accepts
 only that exact tree and rejects changes to patched files.
 
@@ -26,5 +28,6 @@ Native io_uring, macOS and Windows integration remain unmeasured here.
 
 The application also passes the full native test matrix, shared Chromium suite,
 27 rendering comparisons per reference, and all 315 asset checks. The completed
-[benchmark report](../docs/send-copy.md) records the controlled CPU reduction,
-throughput variation, and current Rust/Jai comparison.
+[review report](../docs/send-copy-pr.md) records the thresholded candidate's CPU
+reduction and the remaining plaintext throughput concern. The earlier full Rust/Jai
+comparison used the all-size prototype and remains separately identified.
