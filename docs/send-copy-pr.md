@@ -1,23 +1,27 @@
 # Send-copy upstream review
 
-[Upstream PR #3](https://github.com/kaitk/goose-http/pull/3) remains a draft. The
+[Upstream PR #3](https://github.com/kaitk/goose-http/pull/3) is retired on 2026-10-23. The
 [2026-10-23 review](https://github.com/kaitk/goose-http/pull/3#issuecomment-6371183040)
 finds a 13-28% throughput loss on server-bound 21 KiB responses. Its double-copy
 control has no measurable cost, and it reproduces the Campfire-style gain only
 when the client is saturated. The evidence does not support merging this send path.
 
-The application continues carrying a checksum/tree-pinned functional patch through
-`65bbcf71f1a3f203def7e52ebf909f702a70d81f` on upstream
-`75f0362919dd7140bc672f4cbecfb69033c500fc`, under the existing experiment instruction,
-pending a decision to retire it. The rebase includes goose-compress v0.1.3 and the
-native io_uring allocation fix. Application compression imports use the same v0.1.3
-pin. The fixture now passes the receive tag to both close calls. Nothing has been
-landed on Goose master.
+The application now uses unpatched upstream
+`75f0362919dd7140bc672f4cbecfb69033c500fc`. The dependency lock no longer applies
+the send-copy patch. This retains goose-compress v0.1.3 and the native io_uring
+allocation fix. Application compression imports use the same v0.1.3 pin. The
+retired implementation and its tests remain in Git history and the PR. Nothing
+has been landed on Goose master.
 
-## Local native io_uring requirements
+## Local native io_uring setup
 
-The local host runs WSL 2.4.13.0 with Linux 5.15.167.4. A disposable C probe using
-liburing gives these results on 2026-10-23:
+On 2026-10-23, WSL was updated from 2.4.13.0 to 3.0.3. After an authorized restart,
+both the host and Docker report Linux `6.18.54.1-microsoft-standard-WSL2`.
+Docker remains 29.1.3. A disposable liburing probe now accepts both a basic ring
+and goose-http's required flags under the opt-in profile described below. The
+default Docker profile still returns EPERM.
+
+Before the update, the same probe on Linux 5.15.167.4 gave these results:
 
 | Container policy | Basic ring | goose-http setup flags |
 |---|---|---|
@@ -28,19 +32,28 @@ goose-http requires Linux 6.1 or later for multishot receive, provided buffer ri
 and deferred task running. Its flags are `SINGLE_ISSUER`, `DEFER_TASKRUN`, and
 `SUBMIT_ALL`. Allowing syscalls cannot supply the missing kernel features.
 
-The next native experiment needs a WSL update (`wsl --update`), a scheduled WSL
-restart, and a check of `uname -r` inside Docker. Restarting WSL interrupts other
-Linux processes, so this session leaves the installed kernel unchanged. On a
-suitable kernel, extend Docker's default seccomp profile to allow
-`io_uring_setup`, `io_uring_enter`, and `io_uring_register`, then pass that profile
-with `--security-opt seccomp=/absolute/path/profile.json`. The unrestricted probe
-above is diagnostic, not the deployment configuration.
+Generate the optional container policy from the repository root:
 
-The existing `CAMPFIRE_HTTP_BACKEND=epoll` option works on this kernel and bypasses
-the experimental ring send path. Its delivery tests pass; this session does not
-measure its performance against the emulated or native rings.
+```sh
+python3 scripts/io_uring_profile.py
+docker run --rm --security-opt seccomp=build/seccomp-io-uring.json \
+  -p 3000:3000 --env-file campfire.env \
+  -v /absolute/path/to/storage:/rails/storage once-campfire-goose:app
+```
 
-Before timing native io_uring, confirm the startup log selects it and rerun the
+The generator fetches Moby's official default profile at
+`4b8214fc4971e06172938a1f1554ccff6647ee80`, verifies SHA-256
+`6416b47770785a41ac59073cdc77d9fe98517df2799dc83ef207e622de3053f6`, and adds
+one allow rule for `io_uring_setup`, `io_uring_enter`, and `io_uring_register`.
+All other rules and the default deny action come from that pinned Moby profile.
+This is a per-container option; it does not alter Docker's daemon configuration.
+The unrestricted probe above was diagnostic, not the deployment configuration.
+
+The existing `CAMPFIRE_HTTP_BACKEND=epoll` option also works on this kernel. Without
+the optional profile, `auto` uses the emulated ring. No post-update throughput
+comparison is claimed for these alternatives.
+
+Before timing native io_uring, confirm the startup log selects it and run the
 delivery, acknowledged-write and browser tests. Compare against two independent
 base builds, increase client capacity until server saturation is demonstrated, and
 record total server CPU per validated response. A kernel change requires rerunning
@@ -49,7 +62,7 @@ new-kernel run. Sources: [HTTP shim requirements](https://github.com/kaitk/goose
 [Docker seccomp](https://docs.docker.com/engine/security/seccomp/), and
 [WSL update commands](https://learn.microsoft.com/en-us/windows/wsl/basic-commands#update-wsl).
 
-## Rebase validation
+## Historical patched rebase validation
 
 GCC address/undefined-behavior sanitizers and all 60 HTTP package tests at `-O0` and
 `-O2` pass with official Goose v2026.3 and Clang 18.1.3. Both Linux loops pass the

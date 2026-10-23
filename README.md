@@ -40,20 +40,20 @@ visit `/first_run` to create the account and administrator. Existing Campfire da
 disables response caching. `DATABASE_PATH` and `STORAGE_PATH` override storage locations.
 `CAMPFIRE_HTTP_BACKEND=auto` selects goose-http's native completion loop or its fallback;
 `epoll` selects the direct Linux loop. Both backends run the HTTP and WebSocket integration tests.
+For native io_uring on Linux 6.1 or later, generate and pass the optional
+[container seccomp profile](docs/send-copy-pr.md#local-native-io_uring-setup).
 TLS should terminate at a reverse proxy; application deployment compatibility is still in progress.
 
-## Pinned HTTP patch
+## Pinned HTTP dependency
 
 The build pins upstream goose-http including the merged
 [drain notification PR #2](https://github.com/kaitk/goose-http/pull/2).
 The application uses these credits to bound WebSocket output when readers stall.
-A local checksum-pinned patch tries sends of at least 16 KiB on writable sockets in the
-emulated ring, retaining owned partial writes and deferred drain completions. It is under
-review in [draft PR #3](https://github.com/kaitk/goose-http/pull/3). The review finds
-a 13-28% server-bound throughput loss, so the patch is retained only as an experiment,
-pending a decision to retire it. It is not recommended for merge. The current pin
-includes upstream's native-ring allocation fix and goose-compress v0.1.3.
-See the [patch pin](patches/README.md) and [reproducer](docs/websocket-backpressure.md).
+The dependency is unpatched. The send-copy experiment in
+[PR #3](https://github.com/kaitk/goose-http/pull/3) was retired after review found a
+13-28% server-bound throughput loss. The current pin includes upstream's native-ring
+allocation fix and goose-compress v0.1.3.
+See the [dependency history](patches/README.md) and [reproducer](docs/websocket-backpressure.md).
 
 ## Verification and provenance
 
@@ -69,7 +69,7 @@ reads/s and 8.4k posts/s, versus current Jai's 187k and 5.3k, and Rust's 28.7k a
 The cached-read medians are 11-16% above Jai and posts 60% above it. Mixed reads with writes
 to another room reach 209k/s, versus Jai's 182k/s. Anonymous memory sampled after writes
 is 28.5 MiB, versus 108.3 MiB for Jai and 93.1 MiB for Rust. That comparison predates the
-16 KiB floor and is not a measurement of the current patch. The
+16 KiB floor and the patch's retirement; it does not measure the current application. The
 [historical thresholded five-pair A/B](docs/send-copy-pr.md) reduces median room-read CPU time
 by 4.0%, with a 7.6% throughput increase and overlapping ranges. Its separate pipelined
 plaintext comparison remains 8.5% slower in median throughput. The maintainer's later

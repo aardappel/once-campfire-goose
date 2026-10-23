@@ -8,12 +8,7 @@
       "name": "http",
       "repository": "https://github.com/kaitk/goose-http.git",
       "ref": "75f0362919dd7140bc672f4cbecfb69033c500fc",
-      "revision": "75f0362919dd7140bc672f4cbecfb69033c500fc",
-      "patch": {
-        "file": "patches/goose-http-send-copy.patch",
-        "sha256": "396a9d66f0fa2b1c98951890ff65dee1c4dec7b1348fe4f0dbdbcb0f8652f271",
-        "tree": "7f5f5399cddf0752813d7efeb4218de87c03cea2"
-      }
+      "revision": "75f0362919dd7140bc672f4cbecfb69033c500fc"
     },
     {
       "name": "hash",
