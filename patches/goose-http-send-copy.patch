@@ -1,26 +1,27 @@
 diff --git a/docs/decisions.md b/docs/decisions.md
-index 572b344..9c66087 100644
+index 67a7452..98fbdb7 100644
 --- a/docs/decisions.md
 +++ b/docs/decisions.md
-@@ -109,6 +109,12 @@ nothing queued on its socket first tries synchronous `send(2)`; only unsent byte
+@@ -109,6 +109,13 @@ nothing queued on its socket first tries synchronous `send(2)`; only unsent byte
  need a retained copy. Smaller sends stay asynchronous because a syscall per response
  cost small REST responses throughput.
  
-+The readiness-based emulation (2026-10-23) tries sends of any size when the
-+socket is writable and has no queued send. It already makes one syscall per
-+send, so this does not split a kernel submission batch. It owns the unsent
-+tail before returning and reports even a complete inline send from `ur_wait`.
-+Native io_uring retains the 64 KB threshold.
++The readiness-based emulation (2026-10-22, task 064) tries sends of at least
++16 KiB when the socket is writable and has no queued send. Small sends remain
++queued: immediate output wakes clients while the loop is still processing a
++pipelined receive, and the all-size experiment lost plaintext throughput.
++The ring owns the unsent tail before returning and reports even a complete
++inline send from `ur_wait`. Native io_uring retains the 64 KB threshold.
 +
  ## Files of 64 KB or more go to the loop
  
  Decided 2026-10-12, task 020.
 diff --git a/scripts/fixtures/ring_send.c b/scripts/fixtures/ring_send.c
 new file mode 100644
-index 0000000..0de0a56
+index 0000000..b49a5f3
 --- /dev/null
 +++ b/scripts/fixtures/ring_send.c
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,187 @@
 +/* Deterministic socket outcomes check ownership and deferred completions. */
 +#include <assert.h>
 +#include <stdint.h>
@@ -44,7 +45,7 @@ index 0000000..0de0a56
 +#undef malloc
 +#undef memcpy
 +
-+static unsigned char received[1024];
++static unsigned char received[RP_INLINE * 4];
 +static size_t received_len;
 +static int64_t outcomes[16];
 +static int outcome_count, outcome_at, calls, writable_edge, file_closed;
@@ -98,17 +99,19 @@ index 0000000..0de0a56
 +}
 +static void full_and_ordered(void) {
 +    int64_t h = setup();
-+    unsigned char a[] = "abc", b[] = "def";
++    unsigned char a[RP_INLINE], b[] = "def";
++    memset(a, 'a', sizeof a);
 +    rp_completion c[2] = {0};
-+    assert(RP(send)(h, 7, 11, (rp_bytes){a, 3}) == 0);
-+    assert(copied == 0 && received_len == 3 && calls == 1);
++    assert(RP(send)(h, 7, 11, (rp_bytes){a, sizeof a}) == 0);
++    assert(copied == 0 && received_len == sizeof a && calls == 1);
 +    assert(RP(send)(h, 7, 12, (rp_bytes){b, 3}) == 0);
 +    assert(copied == 3 && calls == 1);
-+    memset(a, 'x', 3); memset(b, 'x', 3);
++    memset(a, 'x', sizeof a); memset(b, 'x', 3);
 +    /* A one-slot result must preserve overflow completion order. */
 +    assert(RP(wait)(h, (rp_completions){c, 1}, 0) == 1);
-+    expect(c[0], 11, 3);
-+    assert(received_len == 6 && memcmp(received, "abcdef", 6) == 0);
++    expect(c[0], 11, sizeof a);
++    assert(received_len == sizeof a + 3 && memcmp(received + sizeof a, "def", 3) == 0);
++    for (size_t i = 0; i < sizeof a; i++) assert(received[i] == 'a');
 +    assert(RP(wait)(h, (rp_completions){c, 1}, 0) == 1);
 +    expect(c[0], 12, 3);
 +    assert(RP(wait)(h, (rp_completions){c, 1}, 0) == 0);
@@ -116,43 +119,46 @@ index 0000000..0de0a56
 +}
 +static void stalled_tail(int64_t first) {
 +    int64_t h = setup();
-+    unsigned char a[] = "abcdef", b[] = "ghi";
++    unsigned char a[RP_INLINE], b[] = "ghi";
++    memset(a, 'a', sizeof a);
 +    rp_completion c[2];
 +    outcomes[0] = first;
 +    outcomes[1] = -RP_EAGAIN;
 +    outcome_count = first > 0 ? 2 : 1;
-+    assert(RP(send)(h, 7, 21, (rp_bytes){a, 6}) == 0);
-+    assert(copied == (size_t)(first > 0 ? 6 - first : 6));
++    assert(RP(send)(h, 7, 21, (rp_bytes){a, sizeof a}) == 0);
++    assert(copied == sizeof a - (size_t)(first > 0 ? first : 0));
 +    assert(RP(send)(h, 7, 22, (rp_bytes){b, 3}) == 0);
 +    assert(calls == 1);
-+    memset(a, 'x', 6); memset(b, 'x', 3);
++    memset(a, 'x', sizeof a); memset(b, 'x', 3);
 +    assert(RP(wait)(h, (rp_completions){c, 2}, 0) == 0);
 +    assert(watching & RP_OUT);
 +    writable_edge = 1;
 +    assert(RP(wait)(h, (rp_completions){c, 2}, 0) == 2);
-+    expect(c[0], 21, 6); expect(c[1], 22, 3);
-+    assert(received_len == 9 && memcmp(received, "abcdefghi", 9) == 0);
++    expect(c[0], 21, sizeof a); expect(c[1], 22, 3);
++    assert(received_len == sizeof a + 3 && memcmp(received + sizeof a, "ghi", 3) == 0);
++    for (size_t i = 0; i < sizeof a; i++) assert(received[i] == 'a');
 +    assert(!(watching & RP_OUT));
 +    RP(destroy)(h);
 +}
 +static void errors_and_close(void) {
 +    int64_t h = setup();
-+    unsigned char a[] = "abc";
++    unsigned char a[RP_INLINE];
++    memset(a, 'a', sizeof a);
 +    rp_completion c;
 +    outcomes[0] = -RP_EINTR; outcome_count = 1;
-+    assert(RP(send)(h, 7, 31, (rp_bytes){a, 3}) == 0);
-+    assert(copied == 3);
++    assert(RP(send)(h, 7, 31, (rp_bytes){a, sizeof a}) == 0);
++    assert(copied == sizeof a);
 +    assert(RP(wait)(h, (rp_completions){&c, 1}, 0) == 1);
-+    expect(c, 31, 3);
++    expect(c, 31, sizeof a);
 +    outcomes[1] = outcomes[2] = -32; outcome_count = 3;
-+    assert(RP(send)(h, 7, 32, (rp_bytes){a, 3}) == 0);
++    assert(RP(send)(h, 7, 32, (rp_bytes){a, sizeof a}) == 0);
 +    assert(RP(wait)(h, (rp_completions){&c, 1}, 0) == 1);
 +    expect(c, 32, -32);
-+    assert(RP(send)(h, 7, 33, (rp_bytes){a, 3}) == 0);
++    assert(RP(send)(h, 7, 33, (rp_bytes){a, sizeof a}) == 0);
 +    RP(close)(h, 7);
 +    assert(RP(wait)(h, (rp_completions){&c, 1}, 0) == 0);
 +    outcomes[3] = -RP_EAGAIN; outcome_count = 4;
-+    assert(RP(send)(h, 7, 34, (rp_bytes){a, 3}) == 0);
++    assert(RP(send)(h, 7, 34, (rp_bytes){a, sizeof a}) == 0);
 +    RP(close)(h, 7);
 +    assert(RP(wait)(h, (rp_completions){&c, 1}, 0) == 0);
 +    RP(destroy)(h);
@@ -160,18 +166,39 @@ index 0000000..0de0a56
 +static void files_and_allocation(void) {
 +    int64_t h = setup();
 +    rp_completion c[2];
-+    unsigned char a[] = "end";
++    unsigned char a[RP_INLINE];
++    memset(a, 'a', sizeof a);
 +    fail_alloc = 1;
-+    assert(RP(send)(h, 7, 40, (rp_bytes){a, 3}) == -RP_ENOMEM);
++    assert(RP(send)(h, 7, 40, (rp_bytes){a, sizeof a}) == -RP_ENOMEM);
 +    assert(calls == 0 && received_len == 0);
 +    assert(RP(send_file)(h, 7, 41, 101, 0, 4) == 0);
-+    assert(RP(send)(h, 7, 42, (rp_bytes){a, 3}) == 0);
-+    assert(calls == 0 && copied == 3);
-+    memset(a, 'x', 3);
++    assert(RP(send)(h, 7, 42, (rp_bytes){a, sizeof a}) == 0);
++    assert(calls == 0 && copied == sizeof a);
++    memset(a, 'x', sizeof a);
 +    assert(RP(wait)(h, (rp_completions){c, 2}, 0) == 2);
-+    expect(c[0], 41, 4); expect(c[1], 42, 3);
-+    assert(received_len == 7 && memcmp(received, "FILEend", 7) == 0 && file_closed == 1);
++    expect(c[0], 41, 4); expect(c[1], 42, sizeof a);
++    assert(received_len == sizeof a + 4 && memcmp(received, "FILE", 4) == 0 && file_closed == 1);
++    for (size_t i = 4; i < received_len; i++) assert(received[i] == 'a');
 +    RP(destroy)(h);
++}
++static void inline_boundary(void) {
++    const size_t lengths[] = {0, 1, RP_INLINE - 1, RP_INLINE};
++    for (size_t i = 0; i < sizeof lengths / sizeof lengths[0]; i++) {
++        int64_t h = setup();
++        unsigned char a[RP_INLINE];
++        memset(a, 'a', sizeof a);
++        size_t n = lengths[i];
++        rp_completion c;
++        assert(RP(send)(h, 7, 51, (rp_bytes){n ? a : NULL, n}) == 0);
++        assert(calls == (n >= RP_INLINE ? 1 : 0));
++        assert(copied == (n >= RP_INLINE ? 0 : n));
++        memset(a, 'x', sizeof a);
++        assert(RP(wait)(h, (rp_completions){&c, 1}, 0) == 1);
++        expect(c, 51, (int32_t)n);
++        assert(received_len == n);
++        for (size_t j = 0; j < n; j++) assert(received[j] == 'a');
++        RP(destroy)(h);
++    }
 +}
 +int main(void) {
 +    full_and_ordered();
@@ -179,6 +206,7 @@ index 0000000..0de0a56
 +    stalled_tail(-RP_EAGAIN);
 +    errors_and_close();
 +    files_and_allocation();
++    inline_boundary();
 +    puts("ring send ownership, ordering, backpressure, and completion tests passed");
 +}
 diff --git a/scripts/test-drain.sh b/scripts/test-drain.sh
@@ -197,7 +225,7 @@ index ab26377..ec97eb5 100644
      "$root/scripts/fixtures/drain_turns.goose"
  python3 "$root/scripts/test-drain-turns.py" "$root/build/drain-turns"
 diff --git a/shim/ring_epoll.c b/shim/ring_epoll.c
-index 57c7f7f..b3454f6 100644
+index 57c7f7f..31c36d1 100644
 --- a/shim/ring_epoll.c
 +++ b/shim/ring_epoll.c
 @@ -10,8 +10,9 @@
@@ -206,30 +234,41 @@ index 57c7f7f..b3454f6 100644
     (shim/kqueue.c), so the listener is watched only while an accept goes on.
 -   A send's bytes are copied and sent in the next ur_wait, and what the
 -   socket doesn't take waits for its writable edge, which is watched only
-+   A send tries an empty, writable socket queue before copying its unsent
-+   bytes. Its completion is delivered in ur_wait, and what the socket
++   A large send tries an empty, writable socket queue before copying its
++   unsent bytes. Its completion is delivered in ur_wait, and what the socket
 +   doesn't take waits for its writable edge, which is watched only
     then: kqueue reports EV_CLEAR's write filter as each ACK frees buffer
     space. Completions that don't fit in ur_wait's out wait in a queue for the
     next call. Every call returns the same Linux errno values as the rest of
-@@ -346,8 +347,9 @@ void RP(recv)(int64_t h, int32_t fd, uint64_t tag) {
+@@ -108,6 +109,10 @@ struct rp_send {
+ #define RP_BIG 65536
+ #define RP_KEEP (4u << 20)
+ 
++/* Small writes stay queued so a pipelined receive is handled before output
++   wakes clients. Larger writes can avoid copying bytes the socket accepts. */
++#define RP_INLINE 16384
++
+ /* What the ring knows of a socket, indexed by its fd. */
+ struct rp_fd {
+     uint64_t tag;                   /* its receive's */
+@@ -346,8 +351,9 @@ void RP(recv)(int64_t h, int32_t fd, uint64_t tag) {
      rp_queue(u, fd);
  }
  
 -/* Copies data, to send it in the next ur_wait after any sends queued before
 -   it on fd. */
-+/* Tries data immediately when no send precedes it on a writable fd, owning
++/* Tries large data immediately when no send precedes it on a writable fd, owning
 +   any unsent tail before returning. Even a full send completes in ur_wait,
 +   so completion accounting and drain callbacks keep their usual turn. */
  int32_t RP(send)(int64_t h, int32_t fd, uint64_t tag, rp_bytes data) {
      struct rp *u = (struct rp *)(intptr_t)h;
      struct rp_fd *f = rp_fd_of(u, fd);
-@@ -361,7 +363,14 @@ int32_t RP(send)(int64_t h, int32_t fd, uint64_t tag, rp_bytes data) {
+@@ -361,7 +367,14 @@ int32_t RP(send)(int64_t h, int32_t fd, uint64_t tag, rp_bytes data) {
      s->len = (uint32_t)data.len;
      s->off = 0;
      s->file = -1;
 -    memcpy(s->data, data.data, (size_t)data.len);
-+    if (!f->sends && f->writable && data.len > 0) {
++    if (data.len >= RP_INLINE && !f->sends && f->writable) {
 +        int64_t sent = net_send(fd, data);
 +        if (sent > 0) s->off = (uint32_t)sent;
 +        else if (sent == -RP_EAGAIN) f->writable = 0;

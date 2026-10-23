@@ -1,16 +1,17 @@
 # Pinned HTTP send optimization
 
-HTTP is pinned to upstream `ebb4238728179e82140550af50e5bab1a7e0dab2`, which
+HTTP is pinned to upstream `df12a627c9f4df51465f1ac7c324c17e86dc78b3`, which
 includes the merged [drain and fairness PR](https://github.com/kaitk/goose-http/pull/2).
 The previous drain patch is no longer needed.
 
-`goose-http-send-copy.patch` is local commit `6f6e7d80e58d689b5f33a08af26c428739f96642`
+`goose-http-send-copy.patch` is local commit `a12328478b48efd9ea6adb2038e3f185fc130651`
 against that revision. It has not been submitted upstream.
 `dependencies.json` pins its SHA-256 and resulting Git tree. Bootstrap accepts
 only that exact tree and rejects changes to patched files.
 
-The readiness-based ring emulation attempts a synchronous send on a writable
-socket with no preceding queued send. It copies only the unsent tail into owned
+The readiness-based ring emulation attempts a synchronous send of at least 16 KiB
+on a writable socket with no preceding queued send. Smaller sends stay queued to
+preserve pipelined throughput. It copies only the unsent tail into owned
 storage before returning. Completions remain deferred until `ur_wait`, including
 fully accepted sends, so the existing drain accounting and scheduling apply.
 Native io_uring's 64 KiB threshold and the separate epoll loop are unchanged.
