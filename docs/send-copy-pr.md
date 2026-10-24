@@ -8,8 +8,9 @@ when the client is saturated. The evidence does not support merging this send pa
 
 At retirement, the application moved to unpatched upstream
 `75f0362919dd7140bc672f4cbecfb69033c500fc`. The dependency lock no longer applies
-the send-copy patch. This retains goose-compress v0.1.3 and the native io_uring
-allocation fix. Application compression imports use the same v0.1.3 pin. The
+the send-copy patch. That pin retained goose-compress v0.1.3 and the native io_uring
+allocation fix. The current HTTP/compression pins and epoll/native measurements
+are in the [backend comparison](backend-selection.md). The
 retired implementation and its tests remain in Git history and the PR. Nothing
 has been landed on Goose master.
 

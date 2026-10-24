@@ -61,24 +61,24 @@ See the [dependency history](patches/README.md) and [reproducer](docs/websocket-
 
 `test_server.py`, native unit tests, and the differential rendering tests are preserved from
 the experiment. Historical results and limitations are in [docs/experiment.md](docs/experiment.md).
-The [recorded comparison](docs/send-copy.md) uses packaged images, current Rust/Jai references,
+The [current comparison](docs/backend-selection.md) uses packaged images, current Rust/Jai references,
 the unchanged shared load generator and validators, and audited writes. It records throughput,
 memory, exact versions, and workload limits. The old Jai `e56ba63` measurements do not describe
 the current `2ecd487` comparison. See [cache validation](docs/read-cache.md) for the read path.
 
-In the earlier `38099a8` all-size prototype, Goose's three-round medians are 213k room
-reads/s and 8.4k posts/s, versus current Jai's 187k and 5.3k, and Rust's 28.7k and 4.1k.
-The cached-read medians are 11-16% above Jai and posts 60% above it. Mixed reads with writes
-to another room reach 209k/s, versus Jai's 182k/s. Anonymous memory sampled after writes
-is 28.5 MiB, versus 108.3 MiB for Jai and 93.1 MiB for Rust. That comparison predates the
-16 KiB floor and the patch's retirement; it does not measure the current application. The
-[historical thresholded five-pair A/B](docs/send-copy-pr.md) reduces median room-read CPU time
-by 4.0%, with a 7.6% throughput increase and overlapping ranges. Its separate pipelined
-plaintext comparison remains 8.5% slower in median throughput. The maintainer's later
-server-bound review overturns the case for this transport change; these figures do
-not measure the current dependency pins. These HTTP workloads have
-no live subscribers and limited generator headroom; they do not measure full application
-or broadcast capacity. Reports include individual samples and limitations.
+On 2026-10-24, Goose with epoll reaches median rates of 386.6k room reads/s and 6.1k
+posts/s without subscribers, versus Jai's 316.7k and 4.3k, and Rust's 19.4k and 3.5k.
+For complete delivery to 64 subscribers, Goose reaches 647 messages/s, versus Jai's
+3,379 and Rust's 2,288. Goose leads these HTTP workloads but has a substantial
+live-delivery gap. Anonymous memory after room reads is 22.55 MiB, versus Jai's
+21.41 and Rust's 36.41. Epoll uses 23.5% less sampled read memory than emulation
+in the separate same-binary backend comparison. The report records individual
+samples, the rejected 256-writer stress run, validation, host activity and limits.
+
+The [send-copy measurements](docs/send-copy.md) and
+[upstream review](docs/send-copy-pr.md) remain as historical evidence for the retired
+experiment. Their rates use a different kernel and workload and do not measure
+the current application.
 
 Application source was extracted from `aardappel/goose` revision
 `9bbf9446` (`bench/campfire`) onto the experimental branch. The Goose compiler remains a separate dependency.
