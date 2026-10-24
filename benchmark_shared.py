@@ -96,6 +96,7 @@ def main():
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--duration", type=int, default=8)
     parser.add_argument("--clients", type=int, default=16)
+    parser.add_argument("--write-clients", type=int, help="POST concurrency (default: same as --clients)")
     parser.add_argument("--client-cores", type=int, help="separate physical cores for the validator (default: same count as server)")
     parser.add_argument("--fanout-clients", type=int, default=0, help="also measure shared ActionCable delivery to this many tabs of one user")
     parser.add_argument("--profiles", default="baseline,mixed")
@@ -110,6 +111,7 @@ def main():
     assert profiles and set(profiles) <= {"baseline", "mixed"}
     assert args.duration > 0 and args.clients > 0 and (args.preflight_only or args.rounds >= 2)
     assert args.fanout_clients >= 0
+    assert args.write_clients is None or args.write_clients > 0
     assert selected and set(selected) <= {"room_show", "messages_page", "sidebar", "search", "avatar", "static_css", "up", "post_message"}
     repo = Path(__file__).resolve().parent
     verification, seed = args.verification.resolve(), args.seed.resolve()
@@ -155,6 +157,7 @@ def main():
         "images": images, "server_cpus": server_cpus, "client_cpus": client_cpus, "memory_limit_bytes": 2 * 1024**3,
         "platform": platform.platform(), "cpu_model": next(line.split(":", 1)[1].strip() for line in Path("/proc/cpuinfo").read_text().splitlines() if line.startswith("model name")),
         "duration_seconds": args.duration, "clients": args.clients, "rounds": args.rounds,
+        "write_clients": args.write_clients or args.clients,
         "fanout_clients": args.fanout_clients,
         "profile_writes": args.profile_writes, "profiles": profiles, "read_routes": selected, "mixed_write_rate": 10, "gzip": True, "preflight_only": args.preflight_only,
         "goose_backend": args.goose_backend or "image default",
@@ -304,7 +307,8 @@ def main():
                                 sample(route, 2, 4, "warmup", mixed=profile == "mixed")
                                 before = metrics(name)
                                 started = time.monotonic()
-                                value = sample(route, args.duration, args.clients, "measured", mixed=profile == "mixed")
+                                clients = (args.write_clients or args.clients) if route == "post_message" else args.clients
+                                value = sample(route, args.duration, clients, "measured", mixed=profile == "mixed")
                                 after = metrics(name)
                                 if "cpu_seconds" in before and "cpu_seconds" in after:
                                     value["server_cpu_cores"] = (after["cpu_seconds"] - before["cpu_seconds"]) / (time.monotonic() - started)
