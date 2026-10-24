@@ -39,14 +39,22 @@ class WebSocket:
             data.extend(part)
         return data
 
-    def send(self, value):
-        data = json.dumps(value).encode()
+    def frame(self, data, opcode):
         mask = secrets.token_bytes(4)
         size = bytes([0x80 | len(data)]) if len(data) < 126 else b"\xfe" + struct.pack("!H", len(data))
-        self.sock.sendall(b"\x81" + size + mask + bytes(c ^ mask[i % 4] for i, c in enumerate(data)))
+        self.sock.sendall(bytes([opcode]) + size + mask + bytes(c ^ mask[i % 4] for i, c in enumerate(data)))
 
-    def subscribe(self, identifier):
-        self.send({"command": "subscribe", "identifier": identifier})
+    def send(self, value, fragmented=False):
+        data = json.dumps(value).encode()
+        if fragmented:
+            split = len(data) // 2
+            self.frame(data[:split], 0x01)
+            self.frame(data[split:], 0x80)
+        else:
+            self.frame(data, 0x81)
+
+    def subscribe(self, identifier, fragmented=False):
+        self.send({"command": "subscribe", "identifier": identifier}, fragmented)
         while True:
             message = self.receive()
             if message.get("identifier") == identifier and "type" in message:
@@ -121,14 +129,14 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
             forged = json.dumps({"channel": "RoomMessagesChannel", "signed_stream_name": signed[:-1] + ("a" if signed[-1] != "a" else "b")})
             assert first.subscribe(forged) == "reject_subscription"
             for connection in sockets:
-                assert connection.subscribe(identifier) == "confirm_subscription"
+                assert connection.subscribe(identifier, fragmented=True) == "confirm_subscription"
                 assert connection.subscribe(presence) == "confirm_subscription"
             with sqlite3.connect(database) as db:
                 assert db.execute("SELECT connections,unread_at FROM memberships WHERE room_id=1").fetchone() == (2, None)
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
                 post = pool.submit(request, "/rooms/1/messages", {"message[body]": "&" * 40000, "message[client_message_id]": "large-publication"}, cookie)
                 heartbeat = json.dumps({"channel": "HeartbeatChannel"})
-                received = first.publication(lambda: first.send({"command": "subscribe", "identifier": heartbeat}))
+                received = first.publication(lambda: first.send({"command": "subscribe", "identifier": heartbeat}, fragmented=True))
                 assert "&amp;" * 40000 in received
                 assert second.publication() == received
                 assert post.result()[0] == 200

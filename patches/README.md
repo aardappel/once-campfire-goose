@@ -1,9 +1,9 @@
 # HTTP dependency history
 
 The application uses unpatched goose-http at
-`75f0362919dd7140bc672f4cbecfb69033c500fc`, including the merged
+`555a723adc103a455ccc4cdf43bd4a9a96608a70` (v0.5.11), including the merged
 [drain and fairness PR #2](https://github.com/kaitk/goose-http/pull/2), the native
-io_uring send-allocation fix, and goose-compress v0.1.3. Bootstrap verifies the
+io_uring send-allocation fix, lazy WebSocket reservations, and goose-compress v0.1.4. Bootstrap verifies the
 immutable revision and rejects tracked dependency modifications.
 
 The send-copy patch from [PR #3](https://github.com/kaitk/goose-http/pull/3) was

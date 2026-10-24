@@ -38,9 +38,10 @@ Storage must be writable by UID 1000. An empty database is initialized from the 
 visit `/first_run` to create the account and administrator. Existing Campfire databases are preserved.
 `HTTP_PORT` defaults to 3000 in the image, `CAMPFIRE_HTTP_THREADS` to 4, and `CAMPFIRE_CACHE=0`
 disables response caching. `DATABASE_PATH` and `STORAGE_PATH` override storage locations.
-`CAMPFIRE_HTTP_BACKEND=auto` selects goose-http's native completion loop or its fallback;
-`epoll` selects the direct Linux loop. Both backends run the HTTP and WebSocket integration tests.
-For native io_uring on Linux 6.1 or later, generate and pass the optional
+`CAMPFIRE_HTTP_BACKEND` defaults to `epoll`, the direct Linux loop usable in ordinary Docker.
+`auto` probes for native io_uring and selects epoll when unavailable. `uring` requires native
+io_uring and refuses emulation; `emulated` explicitly selects the ring emulation for comparisons.
+The selected backend is logged at startup. For `uring` on Linux 6.1 or later, generate and pass the optional
 [container seccomp profile](docs/send-copy-pr.md#local-native-io_uring-setup).
 TLS should terminate at a reverse proxy; application deployment compatibility is still in progress.
 
@@ -52,7 +53,8 @@ The application uses these credits to bound WebSocket output when readers stall.
 The dependency is unpatched. The send-copy experiment in
 [PR #3](https://github.com/kaitk/goose-http/pull/3) was retired after review found a
 13-28% server-bound throughput loss. The current pin includes upstream's native-ring
-allocation fix and goose-compress v0.1.3.
+allocation fix, lazy WebSocket reservations, precise timers, and goose-compress v0.1.4.
+The immutable HTTP pin is v0.5.11; HTTP/3 is disabled in this application.
 See the [dependency history](patches/README.md) and [reproducer](docs/websocket-backpressure.md).
 
 ## Verification and provenance

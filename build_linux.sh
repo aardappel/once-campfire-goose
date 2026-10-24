@@ -14,7 +14,8 @@ if [ "${1:-}" != "--build-only" ]; then
         platform_time_test.c -Wl,--gc-sections -pthread -o build/platform_time_test
     build/platform_time_test
     python3 test_setup.py build/campfire
-    for backend in auto epoll; do
+    python3 test_backends.py build/campfire
+    for backend in auto epoll emulated; do
         CAMPFIRE_HTTP_BACKEND="$backend" python3 test_cable.py build/campfire
         CAMPFIRE_HTTP_BACKEND="$backend" python3 test_server.py build/campfire
         CAMPFIRE_HTTP_BACKEND="$backend" python3 test_server.py build/campfire --no-cache

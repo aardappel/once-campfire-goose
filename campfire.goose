@@ -5,9 +5,9 @@ import cable;
 import message_actions;
 import browser_routes;
 import os;
-import http from "github.com/kaitk/goose-http@75f0362919dd7140bc672f4cbecfb69033c500fc";
+import http from "github.com/kaitk/goose-http@555a723adc103a455ccc4cdf43bd4a9a96608a70";
 import hash from "github.com/kaitk/goose-hash@v0.0.4";
-import compress from "github.com/kaitk/goose-compress@v0.1.3";
+import compress from "github.com/kaitk/goose-compress@v0.1.4";
 import sqlite from "./build/sqlite";
 import http.compression;
 import auth;
@@ -33,7 +33,7 @@ struct Settings {
     storage: u8[..1024] = "storage",
     cache_enabled: bool = true,
     cache_diagnostics: bool = false,
-    epoll: bool = false,
+    epoll: bool = true,
 }
 
 var settings = Settings { .. };
@@ -394,13 +394,17 @@ fn main() {
     if env("CAMPFIRE_CACHE_DIAGNOSTICS", diagnostics) { settings.cache_diagnostics = diagnostics == "1"; }
     var backend: u8[>..]=[];
     if env("CAMPFIRE_HTTP_BACKEND",backend) {
-        guard backend=="epoll" || backend=="auto" else {abort("CAMPFIRE_HTTP_BACKEND must be epoll or auto");}
-        settings.epoll=backend=="epoll";
+        guard backend=="epoll" || backend=="auto" || backend=="uring" || backend=="emulated"
+            else {abort("CAMPFIRE_HTTP_BACKEND must be epoll, auto, uring or emulated");}
+        settings.epoll=backend=="epoll" || backend=="auto" && http::ring_probe()!=0;
     }
     var profiling: u8[>..]=[];
     campfire_profile_enable(env("CAMPFIRE_PROFILE_WRITES",profiling) && profiling=="1");
     var cfg = http::Config { address: "0.0.0.0", port: 3000, workers: 4, max_conns: 1024,
         mail_slots:128,mail_size:8192,max_waiting:1024,.. };
+    cfg.emulate_ring=backend=="emulated";
+    cfg.require_ring=!settings.epoll && !cfg.emulate_ring;
+    write_stderr(str("HTTP backend: ", if settings.epoll {"epoll"} else if cfg.emulate_ring {"emulated"} else {"io_uring"}, "\n"));
     var port_text: u8[>..] = [];
     if env("HTTP_PORT", port_text) || env("PORT", port_text) {
         let port, ok = parse_int(port_text);

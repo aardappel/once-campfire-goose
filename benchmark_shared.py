@@ -87,7 +87,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--apps", default="goose,rust,jai")
     parser.add_argument("--goose-image", default="once-campfire-goose:app")
-    parser.add_argument("--goose-backend", choices=("auto", "epoll"), help="override the Goose image's event loop")
+    parser.add_argument("--goose-backend", choices=("auto", "epoll", "uring", "emulated"), help="override the Goose image's event loop")
+    parser.add_argument("--goose-seccomp", type=Path, help="optional container policy for Goose, recorded by SHA-256")
     parser.add_argument("--rust-image", default="ghcr.io/basecamp/once-campfire-rust:main")
     parser.add_argument("--jai-image", default="ghcr.io/lucasmeijer/once-campfire-jai:2ecd487")
     parser.add_argument("--rounds", type=int, default=3)
@@ -152,6 +153,7 @@ def main():
         "duration_seconds": args.duration, "clients": args.clients, "rounds": args.rounds,
         "profile_writes": args.profile_writes, "profiles": profiles, "read_routes": selected, "mixed_write_rate": 10, "gzip": True, "preflight_only": args.preflight_only,
         "goose_backend": args.goose_backend or "image default",
+        "goose_seccomp": {"path": str(args.goose_seccomp.resolve()), "sha256": checksum(args.goose_seccomp)} if args.goose_seccomp else "Docker default",
         "validator_sha256": checksum(verification / "loadgen/src/validation.rs"),
         "contracts_sha256": checksum(verification / "bench/contracts.rb"),
         "write_audit_sha256": checksum(verification / "bench/validate_acks.rb"),
@@ -201,6 +203,8 @@ def main():
                     launch = ["docker", "run", "-d", "--name", name, "--network", "host",
                               "--cpuset-cpus", cpu_list(server_cpus), "--memory", str(metadata["memory_limit_bytes"]),
                               "--env-file", str(env_file)]
+                    if app == "goose" and args.goose_seccomp:
+                        launch += ["--security-opt", f"seccomp={args.goose_seccomp.resolve()}"]
                     for folder, mount in (("db", "db"), ("files", "files"), ("logs", "logs")):
                         launch += ["-v", f"{data / folder}:/rails/storage/{mount}"]
                     launch += [images[app]["id"]]
@@ -226,6 +230,16 @@ def main():
                             if time.monotonic() >= deadline:
                                 raise RuntimeError(f"{app}: startup timeout")
                             time.sleep(.1)
+                        if app == "goose":
+                            log = command("docker", "logs", name)
+                            row["backend_log"] = log.stdout + log.stderr
+                            descriptors = command("docker", "exec", name, "sh", "-c",
+                                                  'for fd in /proc/1/fd/*; do readlink "$fd" || true; done').stdout
+                            row["native_ring_count"] = descriptors.splitlines().count("anon_inode:[io_uring]")
+                            if args.goose_backend == "uring":
+                                assert row["native_ring_count"] > 0, "native benchmark must have a kernel ring"
+                            elif args.goose_backend in ("epoll", "emulated"):
+                                assert row["native_ring_count"] == 0, "unexpected native ring"
                         client = lambda *params: json_command("taskset", "-c", cpu_list(client_cpus), loadgen, *params)
                         auth = client("login", "--base", base, "--email", labels["emails.david"], "--password", labels["passwords.all"])["cookie"]
                         scrape = client("scrape", "--base", base, "--cookie", auth, "--room", room)

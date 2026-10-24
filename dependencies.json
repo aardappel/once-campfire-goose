@@ -7,8 +7,8 @@
     {
       "name": "http",
       "repository": "https://github.com/kaitk/goose-http.git",
-      "ref": "75f0362919dd7140bc672f4cbecfb69033c500fc",
-      "revision": "75f0362919dd7140bc672f4cbecfb69033c500fc"
+      "ref": "555a723adc103a455ccc4cdf43bd4a9a96608a70",
+      "revision": "555a723adc103a455ccc4cdf43bd4a9a96608a70"
     },
     {
       "name": "hash",
@@ -19,8 +19,8 @@
     {
       "name": "compress",
       "repository": "https://github.com/kaitk/goose-compress.git",
-      "ref": "v0.1.3",
-      "revision": "f7171852aa195d0ef8123e3d432eb86e0599cc50"
+      "ref": "v0.1.4",
+      "revision": "6f0c17ac4ceeca930cc7cd9c6b5d9293c8b09f50"
     }
   ],
   "sqlite": {

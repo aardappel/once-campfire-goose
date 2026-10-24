@@ -6,7 +6,7 @@ finds a 13-28% throughput loss on server-bound 21 KiB responses. Its double-copy
 control has no measurable cost, and it reproduces the Campfire-style gain only
 when the client is saturated. The evidence does not support merging this send path.
 
-The application now uses unpatched upstream
+At retirement, the application moved to unpatched upstream
 `75f0362919dd7140bc672f4cbecfb69033c500fc`. The dependency lock no longer applies
 the send-copy patch. This retains goose-compress v0.1.3 and the native io_uring
 allocation fix. Application compression imports use the same v0.1.3 pin. The
@@ -37,7 +37,7 @@ Generate the optional container policy from the repository root:
 ```sh
 python3 scripts/io_uring_profile.py
 docker run --rm --security-opt seccomp=build/seccomp-io-uring.json \
-  -p 3000:3000 --env-file campfire.env \
+  -p 3000:3000 --env-file campfire.env -e CAMPFIRE_HTTP_BACKEND=uring \
   -v /absolute/path/to/storage:/rails/storage once-campfire-goose:app
 ```
 
@@ -49,9 +49,10 @@ All other rules and the default deny action come from that pinned Moby profile.
 This is a per-container option; it does not alter Docker's daemon configuration.
 The unrestricted probe above was diagnostic, not the deployment configuration.
 
-The existing `CAMPFIRE_HTTP_BACKEND=epoll` option also works on this kernel. Without
-the optional profile, `auto` uses the emulated ring. No post-update throughput
-comparison is claimed for these alternatives.
+The default is now `CAMPFIRE_HTTP_BACKEND=epoll`. `auto` probes native io_uring and
+chooses direct epoll when unavailable. `uring` requires native support, while
+`emulated` explicitly requests the ring emulation. The optional profile alone
+does not change the application's default backend.
 
 Before timing native io_uring, confirm the startup log selects it and run the
 delivery, acknowledged-write and browser tests. Compare against two independent
@@ -64,7 +65,7 @@ new-kernel run. Sources: [HTTP shim requirements](https://github.com/kaitk/goose
 
 ## Unpatched application validation after the kernel update
 
-The application uses pristine HTTP revision `75f0362919dd7140bc672f4cbecfb69033c500fc`;
+This validation used pristine HTTP revision `75f0362919dd7140bc672f4cbecfb69033c500fc`;
 the built dependency checkout has no tracked changes. The full test-image matrix
 passes under Docker's default policy, exercising the emulated ring and direct epoll.
 Under the restricted io_uring profile, setup, authentication, caching on/off,
