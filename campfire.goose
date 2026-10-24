@@ -367,6 +367,7 @@ thread_fn worker(cfg: http::Config) {
     campfire::close_writer(writer);
     sqlite::finalize(version);
     sqlite::close(db);
+    http::exit_on_error(e);
     http::report(e);
 }
 

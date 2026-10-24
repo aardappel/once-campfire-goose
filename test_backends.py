@@ -50,11 +50,15 @@ def check(mode, expected=None):
                 output = log.read()
                 if not ready:
                     assert mode == "uring" and not args.require_native, output
-                    assert server.poll() is not None and "io_uring: " in output, output
+                    assert server.poll() not in (None, 0) and "io_uring: " in output, output
                     print("PASS: required io_uring refuses unavailable native support")
                     return False
-                rings = sum(os.readlink(fd) == "anon_inode:[io_uring]"
-                            for fd in Path(f"/proc/{server.pid}/fd").iterdir())
+                rings = 0
+                for fd in Path(f"/proc/{server.pid}/fd").iterdir():
+                    try:
+                        rings += os.readlink(fd) == "anon_inode:[io_uring]"
+                    except FileNotFoundError:
+                        pass
                 if mode == "uring":
                     expected = "io_uring"
                 assert f"HTTP backend: {expected}\n" in output, output
