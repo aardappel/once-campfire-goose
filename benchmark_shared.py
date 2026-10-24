@@ -11,11 +11,13 @@ import argparse
 from contextlib import closing
 from datetime import datetime, timezone
 import hashlib
+import html
 import http.client
 import json
 import os
 from pathlib import Path
 import platform
+import re
 import resource
 import shutil
 import socket
@@ -95,6 +97,7 @@ def main():
     parser.add_argument("--duration", type=int, default=8)
     parser.add_argument("--clients", type=int, default=16)
     parser.add_argument("--client-cores", type=int, help="separate physical cores for the validator (default: same count as server)")
+    parser.add_argument("--fanout-clients", type=int, default=0, help="also measure shared ActionCable delivery to this many tabs of one user")
     parser.add_argument("--profiles", default="baseline,mixed")
     parser.add_argument("--routes", default="room_show,messages_page,sidebar,search,post_message")
     parser.add_argument("--preflight-only", action="store_true")
@@ -106,6 +109,7 @@ def main():
     assert apps and len(set(apps)) == len(apps) and set(apps) <= {"goose", "rust", "jai"}
     assert profiles and set(profiles) <= {"baseline", "mixed"}
     assert args.duration > 0 and args.clients > 0 and (args.preflight_only or args.rounds >= 2)
+    assert args.fanout_clients >= 0
     assert selected and set(selected) <= {"room_show", "messages_page", "sidebar", "search", "avatar", "static_css", "up", "post_message"}
     repo = Path(__file__).resolve().parent
     verification, seed = args.verification.resolve(), args.seed.resolve()
@@ -151,6 +155,7 @@ def main():
         "images": images, "server_cpus": server_cpus, "client_cpus": client_cpus, "memory_limit_bytes": 2 * 1024**3,
         "platform": platform.platform(), "cpu_model": next(line.split(":", 1)[1].strip() for line in Path("/proc/cpuinfo").read_text().splitlines() if line.startswith("model name")),
         "duration_seconds": args.duration, "clients": args.clients, "rounds": args.rounds,
+        "fanout_clients": args.fanout_clients,
         "profile_writes": args.profile_writes, "profiles": profiles, "read_routes": selected, "mixed_write_rate": 10, "gzip": True, "preflight_only": args.preflight_only,
         "goose_backend": args.goose_backend or "image default",
         "goose_seccomp": {"path": str(args.goose_seccomp.resolve()), "sha256": checksum(args.goose_seccomp)} if args.goose_seccomp else "Docker default",
@@ -306,6 +311,40 @@ def main():
                                 value["server_anonymous_bytes_after"] = after.get("anonymous_bytes")
                                 row["samples"].append(value)
                                 print(f"{label} {route}: {value['rps']} valid requests/s", flush=True)
+                            if args.fanout_clients:
+                                with closing(sqlite3.connect(database)) as db:
+                                    fanout_start = db.execute("SELECT max(id) FROM messages").fetchone()[0]
+                                params = ["taskset", "-c", cpu_list(client_cpus), str(loadgen), "cable",
+                                          "--base", base, "--cookie", auth, "--room", str(room), "--csrf", csrf,
+                                          "--streams", ",".join(scrape["streams"]), "--clients", str(args.fanout_clients),
+                                          "--latency-msgs", "20", "--interval-ms", "50", "--tput-secs", str(args.duration),
+                                          "--posters", "4", "--hold-secs", "1"]
+                                phases = {}
+                                with subprocess.Popen(params, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
+                                    for line in process.stderr:
+                                        fields = line.split()
+                                        if len(fields) == 3 and fields[0] == "PHASE":
+                                            if fields[1] in ("idle", "saturated", "saturated_drained"):
+                                                phases[fields[1]] = dict(metrics(name), unix_ms=int(fields[2]))
+                                    payload = process.stdout.read()
+                                    assert process.wait() == 0, "shared fan-out generator failed"
+                                cable = json.loads(payload)
+                                save(output / "raw" / f"{label}-fanout.json", cable)
+                                assert cable["ready"] == args.fanout_clients and cable["failed"] == 0, cable
+                                paced, saturated = cable["latency"], cable["throughput"]
+                                assert paced["post_errors"] == 0 and paced["complete"] == paced["messages"] == paced["post_successes"], cable
+                                assert saturated["post_errors"] == 0 and saturated["complete"] == saturated["posted"] == saturated["post_attempts"] > 0, cable
+                                expected = {f"fanout bmk{i}z" for i in range(1, paced["messages"] + saturated["posted"] + 1)}
+                                with closing(sqlite3.connect(database)) as db:
+                                    bodies = db.execute("SELECT r.body,idx.body FROM messages m "
+                                                        "LEFT JOIN action_text_rich_texts r ON r.record_id=m.id AND r.record_type='Message' AND r.name='body' "
+                                                        "LEFT JOIN message_search_index idx ON idx.rowid=m.id "
+                                                        "WHERE m.room_id=? AND m.id>?", (room, fanout_start)).fetchall()
+                                assert len(bodies) == len(expected)
+                                assert {html.unescape(re.sub(r"<[^>]*>", "", body)).strip() for body, _ in bodies} == expected
+                                assert {body.strip() for _, body in bodies} == expected
+                                row["fanout"] = dict(cable, phase_metrics=phases, persisted_messages=len(bodies))
+                                print(f"{label} fanout: {saturated['delivered_msgs_per_sec']} messages/s delivered to all {args.fanout_clients} subscribers; persistence verified", flush=True)
                         audited = json_command("ruby", verification / "bench/validate_acks.rb", database, write_room, acknowledged, *audits)
                         with closing(sqlite3.connect(database)) as db:
                             assert db.execute("SELECT count(*) FROM messages WHERE room_id=?", (write_room,)).fetchone()[0] - initial_count == acknowledged
