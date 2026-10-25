@@ -45,7 +45,12 @@ an already-started WebSocket message finishes before its identifier can be reuse
 Client commands received between fragments wait in a bounded 64 KiB buffer.
 The broker processes at most 128 queued commands before a delivery pass, keeps at most
 16 subscriptions in each connection, and assembles batches with bulk slice copies into
-one reusable buffer. A generation-checked mailbox send detects stale ready readers;
+one reusable buffer. Up to 64 readers on the same worker can share one mailbox chunk
+when their publication, identifier and frame offset match. A delivery pass examines at
+most 256 following connection slots for each group. The 8 KiB slot includes recipient
+keys, so grouping reduces payload capacity rather than enlarging a slot. The worker
+checks each recipient's generation before sending and returns each reader's own drain
+credit. An ordinary mailbox send detects stale ready readers;
 readers awaiting drain credits also receive explicit liveness checks.
 Disconnected readers are removed. A message POST is acknowledged only after its transaction
 commits and every enrolled subscriber's batches have reached their socket, or the subscriber

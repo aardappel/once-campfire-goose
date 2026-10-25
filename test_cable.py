@@ -107,6 +107,8 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
         available.bind(("127.0.0.1", 0))
         port = available.getsockname()[1]
     environment = dict(os.environ, DATABASE_PATH=str(database), HTTP_PORT=str(port), SECRET_KEY_BASE=secrets.token_hex(64))
+    if "--batch-pressure" in sys.argv[2:]:
+        environment["CAMPFIRE_HTTP_THREADS"] = "1"
     with (work / "server.log").open("w+") as log:
         server = subprocess.Popen([str(Path(sys.argv[1]).resolve())], env=environment, stdout=log, stderr=log)
         sockets = []
@@ -154,7 +156,7 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
                 for alias in aliases:
                     assert second.subscribe(alias) == "confirm_subscription"
                 assert second.subscribe(identifier) == "confirm_subscription"
-                for size in (0, 7500, 16000):
+                for size in (0, 1000, 4000, 7500, 16000):
                     marker = f"ordered-publication-{size}"
                     post = pool.submit(request, "/rooms/1/messages",
                                        {"message[body]": marker + "x" * size, "message[client_message_id]": marker}, cookie)
@@ -199,17 +201,32 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
             slow, fast, peer = WebSocket(port, cookie, receive_buffer=1024), WebSocket(port, cookie), WebSocket(port, cookie)
             sockets.extend([slow, fast, peer])
             assert slow.subscribe(identifier) == fast.subscribe(identifier) == peer.subscribe(identifier) == "confirm_subscription"
+            batch_pressure = "--batch-pressure" in sys.argv[2:]
+            pressure_ids = [identifier]
+            if batch_pressure:
+                for alias in range(5):
+                    extra = json.dumps({"channel": "RoomMessagesChannel", "signed_stream_name": signed, "alias": alias})
+                    pressure_ids.append(extra)
+                    for connection in (slow, fast, peer):
+                        assert connection.subscribe(extra) == "confirm_subscription"
             received, peer_received, late_received, reader_errors = [], [], [], []
-            def read_pressure(connection, destination):
+            def read_pressure(connection, destination, identifiers):
                 try:
                     while True:
-                        message = connection.publication()
+                        delivered = {}
+                        while len(delivered) < len(identifiers):
+                            event = connection.receive()
+                            if isinstance(event.get("message"), str):
+                                assert event["identifier"] in identifiers and event["identifier"] not in delivered
+                                delivered[event["identifier"]] = event["message"]
+                        message = next(iter(delivered.values()))
+                        assert all(value == message for value in delivered.values()), "publication frames interleaved"
                         if "pressure-finished" in message:
                             return
                         destination.append(re.search(r"pressure-item-\d+", message)[0])
                 except BaseException as error:
                     reader_errors.append(error)
-            readers = [threading.Thread(target=read_pressure, args=(connection, destination), daemon=True)
+            readers = [threading.Thread(target=read_pressure, args=(connection, destination, pressure_ids), daemon=True)
                        for connection, destination in ((fast, received), (peer, peer_received))]
             for reader in readers:
                 reader.start()
@@ -224,10 +241,10 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
             with concurrent.futures.ThreadPoolExecutor(max_workers=64) as pool:
                 try:
                     # Fill the slow reader's TCP window before checking application back-pressure.
-                    for i in range(64):
+                    for i in range(1024 if batch_pressure else 64):
                         marker = f"pressure-item-{i}"
                         post = pool.submit(request, "/rooms/1/messages",
-                                           {"message[body]": marker + "&" * 40000, "message[client_message_id]": marker}, cookie)
+                                           {"message[body]": marker + ("x" * 512 if batch_pressure else "&" * 40000), "message[client_message_id]": marker}, cookie)
                         accepted.append((marker, post))
                         try:
                             assert post.result(timeout=.5)[0] == 200
@@ -245,7 +262,7 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
                     for _ in range(62):
                         marker = f"pressure-item-{len(accepted)}"
                         accepted.append((marker, pool.submit(request, "/rooms/1/messages",
-                                                             {"message[body]": marker + "&" * (5000 * (len(accepted) % 4)), "message[client_message_id]": marker}, cookie)))
+                                                             {"message[body]": marker + ("x" * (128 * (len(accepted) % 4)) if batch_pressure else "&" * (5000 * (len(accepted) % 4))), "message[client_message_id]": marker}, cookie)))
                     deadline = time.monotonic() + 5
                     while message_count() < start_count + len(accepted) and time.monotonic() < deadline:
                         time.sleep(.02)
@@ -262,7 +279,7 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
                     late = WebSocket(port, cookie)
                     sockets.append(late)
                     assert late.subscribe(identifier) == "confirm_subscription"
-                    late_reader = threading.Thread(target=read_pressure, args=(late, late_received), daemon=True)
+                    late_reader = threading.Thread(target=read_pressure, args=(late, late_received, [identifier]), daemon=True)
                     readers.append(late_reader)
                     late_reader.start()
                     retained = rss()

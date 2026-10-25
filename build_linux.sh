@@ -17,10 +17,11 @@ if [ "${1:-}" != "--build-only" ]; then
     python3 test_backends.py build/campfire
     for backend in auto epoll emulated; do
         CAMPFIRE_HTTP_BACKEND="$backend" python3 test_cable.py build/campfire
+        CAMPFIRE_HTTP_BACKEND="$backend" python3 test_cable.py build/campfire --batch-pressure
         CAMPFIRE_HTTP_BACKEND="$backend" python3 test_server.py build/campfire
         CAMPFIRE_HTTP_BACKEND="$backend" python3 test_server.py build/campfire --no-cache
     done
-    for test in cache auth render; do
+    for test in cache auth render worker_mail; do
         "$compiler" build --offline --cc clang -o "build/${test}_test" "${test}_test.goose"
         "build/${test}_test"
     done

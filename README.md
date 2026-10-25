@@ -50,7 +50,8 @@ TLS should terminate at a reverse proxy; application deployment compatibility is
 The build pins upstream goose-http including the merged
 [drain notification PR #2](https://github.com/kaitk/goose-http/pull/2).
 The application uses these credits to bound WebSocket output when readers stall.
-The dependency is unpatched. The send-copy experiment in
+The experimental build carries a pinned worker-dispatch extension, which lets an HTTP
+worker deliver one shared mailbox chunk to multiple readers. The send-copy experiment in
 [PR #3](https://github.com/kaitk/goose-http/pull/3) was retired after review found a
 13-28% server-bound throughput loss. The current pin includes upstream's native-ring
 allocation fix, lazy WebSocket reservations, precise timers, and goose-compress v0.1.4.

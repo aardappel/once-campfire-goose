@@ -18,7 +18,7 @@ struct CableCommand {
 struct CableSubscriber { live: bool = false, retiring: bool = false, room: i64, stream: i32, identifier: u8[:] }
 struct CableConnection {
     live: bool = false, address: http::MailAddress, user: i64,
-    ready: bool = true, sequence: i64 = 0, offset: i64 = 0
+    ready: bool = true, sequence: i64 = 0, offset: i64 = 0, attempted: i64 = 0
 }
 struct CableDelivery { reply: http::MailAddress, body: u8[:], remaining: i64 = 0 }
 let CABLE_WINDOW: i64 = 8;
@@ -54,6 +54,10 @@ thread_fn cable_broker() {
     var body: u8[>..] = [];
     var prefix: u8[>..] = [];
     var chunk: u8[>..] = [];
+    var turn: i64 = 0;
+    var readers: i64[..64] = [];
+    var selected: i64[..64] = [];
+    var addresses: http::MailAddress[..64] = [];
 
     fn drop_connection(index: i64) {
         connections[index].live = false;
@@ -150,9 +154,21 @@ thread_fn cable_broker() {
                 window[slot].body = encoded;
                 tail++;
             }
+            turn++;
+            // Apply drain credits before grouping readers at their next frame.
             for &c, ci in connections {
                 c.sequence = max(c.sequence, head);
-                if !c.live || c.sequence == tail { continue; }
+                if !c.live || !c.ready { continue; }
+                while c.sequence < tail {
+                    let slot = c.sequence % CABLE_WINDOW;
+                    let mask = targets[ci*CABLE_WINDOW+slot];
+                    if mask & 65535 != 0 { break; }
+                    if mask & CABLE_ENROLLED != 0 { window[slot].remaining--; targets[ci*CABLE_WINDOW+slot] = 0; }
+                    c.sequence++; c.offset = 0;
+                }
+            }
+            for &c, ci in connections {
+                if !c.live || c.sequence == tail || c.attempted == turn { continue; }
                 if !c.ready {
                     if !http::mail_live(c.address) { drop_connection(ci); }
                     continue;
@@ -160,20 +176,29 @@ thread_fn cable_broker() {
                 while c.sequence < tail {
                     let slot = c.sequence % CABLE_WINDOW;
                     let mask = targets[ci*CABLE_WINDOW+slot];
-                    if mask & 65535 == 0 {
-                        // A final send keeps its completion credit until the next drain event.
-                        if mask & CABLE_ENROLLED != 0 { window[slot].remaining--; targets[ci*CABLE_WINDOW+slot] = 0; }
-                        c.sequence++; c.offset = 0;
-                        continue;
-                    }
                     var subscription: i64 = 0;
                     while mask & (1 << subscription) == 0 { subscription++; }
                     let sub .= subscriptions[ci*16+subscription];
                     let payload = window[slot].body;
+                    readers.clear(); selected.clear(); addresses.clear();
+                    readers.push(ci); selected.push(subscription); addresses.push(c.address); c.attempted = turn;
+                    // Bound lookahead as well as payload size; workers share chunks at equal frame positions.
+                    for &other, oi in connections[ci+1..min(ci+257, connections.len)] {
+                        if readers.len == 64 { break; }
+                        if !other.live || !other.ready || other.attempted == turn || other.address.box != c.address.box ||
+                            other.sequence != c.sequence || other.offset != c.offset { continue; }
+                        let index = ci + 1 + oi;
+                        let bits = targets[index*CABLE_WINDOW+slot] & 65535;
+                        if bits == 0 { continue; }
+                        var si: i64 = 0; while bits & (1 << si) == 0 { si++; }
+                        if subscriptions[index*16+si].identifier != sub.identifier { continue; }
+                        readers.push(index); selected.push(si); addresses.push(other.address); other.attempted = turn;
+                    }
                     prefix.clear(); prefix.append("{\"identifier\":");
                     json::format_string(prefix, sub.identifier); prefix.append(",\"message\":");
                     let length = prefix.len + payload.len + 1;
-                    let end = min(c.offset + 8192, length);
+                    let capacity = if readers.len == 1 { 8192 } else { 8192 - 2 - 8*readers.len };
+                    let end = min(c.offset + capacity, length);
                     chunk.clear();
                     if c.offset < prefix.len { chunk.append(prefix[c.offset..min(end, prefix.len)]); }
                     let start = max(c.offset, prefix.len);
@@ -181,13 +206,16 @@ thread_fn cable_broker() {
                     if start < stop { chunk.append(payload[start-prefix.len..stop-prefix.len]); }
                     if end == length { chunk.push('}'); }
                     let tag = ((if c.offset == 0 { 1 } else { 0 }) | (if end == length { 128 } else { 0 })) as i32;
-                    let sent = http::mail_send(c.address, tag, chunk);
-                    if sent == http::STALE { drop_connection(ci); break; }
+                    let sent = if readers.len == 1 { http::mail_send(c.address, tag, chunk) } else { http::mail_send_many(addresses, tag, chunk) };
+                    if sent == http::STALE { for index in readers { drop_connection(index); } break; }
                     if sent == http::SENT {
-                        c.ready = false; c.offset = end;
-                        if end == length {
-                            targets[ci*CABLE_WINDOW+slot] &= ~(1 << subscription); c.offset = 0;
-                            if sub.retiring { storage.free_slice(sub.identifier); subscriptions[ci*16+subscription].retiring = false; }
+                        for index, ri in readers {
+                            connections[index].ready = false; connections[index].offset = end;
+                            if end == length {
+                                targets[index*CABLE_WINDOW+slot] &= ~(1 << selected[ri]); connections[index].offset = 0;
+                                let at = index*16+selected[ri];
+                                if subscriptions[at].retiring { storage.free_slice(subscriptions[at].identifier); subscriptions[at].retiring = false; }
+                            }
                         }
                     }
                     break;
