@@ -19,6 +19,7 @@ from pathlib import Path
 import platform
 import re
 import resource
+import secrets
 import shutil
 import socket
 import sqlite3
@@ -50,6 +51,23 @@ def save(path, value):
 def checksum(path):
     with path.open("rb") as source:
         return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def server_port():
+    # Host-network servers must not compete with load-generator ephemeral sockets.
+    ephemeral_start = int(Path("/proc/sys/net/ipv4/ip_local_port_range").read_text().split()[0])
+    if ephemeral_start <= 1025:
+        raise RuntimeError("benchmark needs two unprivileged ports below the ephemeral range")
+    for _ in range(128):
+        port = 1024 + secrets.randbelow(ephemeral_start - 1025)
+        with socket.socket() as public, socket.socket() as target:
+            try:
+                public.bind(("0.0.0.0", port))
+                target.bind(("0.0.0.0", port + 1))
+            except OSError:
+                continue
+            return port
+    raise RuntimeError("no available server port pair outside the ephemeral range")
 
 
 def valid(value, label):
@@ -195,9 +213,7 @@ def main():
                     os.chmod(database, 0o666)
                     # TemporaryDirectory is private to the runner; image uid 1000 needs traversal.
                     os.chmod(data, 0o755)
-                    with socket.socket() as sock:
-                        sock.bind(("127.0.0.1", 0))
-                        port = sock.getsockname()[1]
+                    port = server_port()
                     config = dict(fixture_env, WEB_CONCURRENCY="3", JOB_CONCURRENCY="3", RAILS_MAX_THREADS="5",
                                   RAILS_LOG_LEVEL="warn", HTTP_PORT=str(port), TARGET_PORT=str(port + 1),
                                   PORT=str(port), DATABASE_PATH="/rails/storage/db/production.sqlite3",

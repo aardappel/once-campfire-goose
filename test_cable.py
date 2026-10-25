@@ -245,7 +245,7 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
                     for _ in range(62):
                         marker = f"pressure-item-{len(accepted)}"
                         accepted.append((marker, pool.submit(request, "/rooms/1/messages",
-                                                             {"message[body]": marker, "message[client_message_id]": marker}, cookie)))
+                                                             {"message[body]": marker + "&" * (5000 * (len(accepted) % 4)), "message[client_message_id]": marker}, cookie)))
                     deadline = time.monotonic() + 5
                     while message_count() < start_count + len(accepted) and time.monotonic() < deadline:
                         time.sleep(.02)
