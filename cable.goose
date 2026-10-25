@@ -15,11 +15,14 @@ struct CableCommand {
     kind: i32, address: http::MailAddress, user: i64 = 0, room: i64 = 0,
     stream: i32 = 0, data: u8[]
 }
-struct CableSubscriber { live: bool = false, room: i64, stream: i32, identifier: u8[:] }
+struct CableSubscriber { live: bool = false, retiring: bool = false, room: i64, stream: i32, identifier: u8[:] }
 struct CableConnection {
     live: bool = false, address: http::MailAddress, user: i64,
-    ready: bool = true, subscription: i64 = 0, offset: i64 = 0, enrolled: bool = false
+    ready: bool = true, sequence: i64 = 0, offset: i64 = 0
 }
+struct CableDelivery { reply: http::MailAddress, body: u8[:], remaining: i64 = 0 }
+let CABLE_WINDOW: i64 = 8;
+let CABLE_ENROLLED: i32 = 65536;
 let CABLE_JOIN: i32 = 1;
 let CABLE_CREDIT: i32 = 2;
 let CABLE_LEAVE: i32 = 3;
@@ -41,25 +44,31 @@ thread_fn cable_broker() {
     var connections: CableConnection[>..] = [];
     // Each connection owns 16 contiguous slots; connection scans do not copy their payloads.
     var subscriptions: CableSubscriber[>..] = [];
+    // The low 16 bits identify subscriptions; the high bit owns one completion credit.
+    var targets: i32[>..] = [];
     reusable[] var storage: u8[>..] = [];
+    reusable[] var publications: u8[>..] = [];
+    var window: CableDelivery[8] = [CableDelivery { .. }; 8];
+    var head: i64 = 0;
+    var tail: i64 = 0;
     var body: u8[>..] = [];
     var prefix: u8[>..] = [];
     var chunk: u8[>..] = [];
-    var reply = http::MailAddress { .. };
-    var room: i64 = 0;
-    var active = false;
 
     fn drop_connection(index: i64) {
         connections[index].live = false;
-        connections[index].enrolled = false;
+        for &target, slot in targets[index*CABLE_WINDOW..(index+1)*CABLE_WINDOW] {
+            if target & CABLE_ENROLLED != 0 { window[slot].remaining--; }
+            target = 0;
+        }
         for &sub in subscriptions[index*16..index*16+16] {
-            if sub.live {
+            if sub.live || sub.retiring {
                 storage.free_slice(sub.identifier);
-                sub.live = false;
+                sub.live = false; sub.retiring = false;
             }
         }
     }
-    fn matches(sub: const CableSubscriber&, user: i64) -> bool {
+    fn matches(sub: const CableSubscriber&, user: i64, room: i64) -> bool {
         return sub.live && (if room==0 { sub.stream==2 } else if room<0 { sub.stream==5 && user == -room } else { sub.stream==1 && sub.room==room });
     }
     fn apply_command(command: const CableCommand&) {
@@ -72,19 +81,21 @@ thread_fn cable_broker() {
                     index = connections.len;
                     connections.push(CableConnection { address: command.address, user: command.user, .. });
                     for _ in 0..16 { subscriptions.push(CableSubscriber { .. }); }
+                    for _ in 0..CABLE_WINDOW { targets.push(0); }
                 }
-                connections[index] = CableConnection { live: true, address: command.address, user: command.user, .. };
+                connections[index] = CableConnection { live: true, address: command.address, user: command.user, sequence: tail, .. };
             }
             var duplicate = false;
             var slot: i64 = -1;
             var count: i64 = 0;
             for sub, i in subscriptions[index*16..index*16+16] {
-                if sub.live { count++; if sub.identifier == command.data { duplicate = true; } }
-                if !sub.live { slot = i; }
+                if sub.live || sub.retiring { count++; }
+                if sub.live && sub.identifier == command.data { duplicate = true; }
+                if !sub.live && !sub.retiring { slot = i; }
             }
             if !duplicate && count < 16 {
                 let id = storage.alloc_slice(command.data.len); copy_into(id, command.data);
-                let sub = CableSubscriber { live: true, room: command.room, stream: command.stream, identifier: id };
+                let sub = CableSubscriber { live: true, room: command.room, stream: command.stream, identifier: id, .. };
                 subscriptions[index*16+slot] = sub;
             }
         } else if index >= 0 && command.kind == CABLE_CREDIT {
@@ -92,9 +103,17 @@ thread_fn cable_broker() {
         } else if index >= 0 && command.kind == CABLE_LEAVE {
             drop_connection(index);
         } else if index >= 0 && command.kind == CABLE_UNSUBSCRIBE {
-            for &sub in subscriptions[index*16..index*16+16] {
+            for &sub, si in subscriptions[index*16..index*16+16] {
                 if sub.live && sub.identifier == command.data {
-                    storage.free_slice(sub.identifier); sub.live = false;
+                    let current = connections[index].sequence % CABLE_WINDOW;
+                    let mask = targets[index*CABLE_WINDOW+current];
+                    let partial = connections[index].offset != 0 && (mask & (1 << si)) != 0 && (mask & ((1 << si)-1)) == 0;
+                    sub.live = false; sub.retiring = partial;
+                    // An already-started WebSocket message must finish before its identifier can be reused.
+                    if !partial { storage.free_slice(sub.identifier); }
+                    for &target, slot in targets[index*CABLE_WINDOW..(index+1)*CABLE_WINDOW] {
+                        if !partial || slot != current { target &= ~(1 << si); }
+                    }
                 }
             }
         }
@@ -109,59 +128,82 @@ thread_fn cable_broker() {
             apply_command(command);
         }
         loop {
-            if !active {
+            while tail - head < CABLE_WINDOW {
                 let pending, exists = qpoll<Publication>();
                 if !exists { break; }
+                let slot = tail % CABLE_WINDOW;
+                window[slot].reply = pending.reply;
+                window[slot].remaining = 0;
                 body.clear();
-                room = pending.room; reply = pending.reply; active = true;
-                var observed = false;
                 for &c, ci in connections {
-                    c.enrolled = false; c.subscription = 0; c.offset = 0;
+                    var mask: i32 = 0;
                     if c.live {
-                        for sub in subscriptions[ci*16..ci*16+16] {
-                            if matches(sub, c.user) { c.enrolled = true; observed = true; break; }
+                        for sub, si in subscriptions[ci*16..ci*16+16] {
+                            if matches(sub, c.user, pending.room) { mask |= 1 << si; }
                         }
                     }
+                    if mask != 0 { mask |= CABLE_ENROLLED; window[slot].remaining++; }
+                    targets[ci*CABLE_WINDOW+slot] = mask;
                 }
-                if observed { json::format_string(body, pending.body); }
+                if window[slot].remaining != 0 { json::format_string(body, pending.body); }
+                let encoded = publications.alloc_slice(body.len); copy_into(encoded, body);
+                window[slot].body = encoded;
+                tail++;
             }
-            var remaining = false;
             for &c, ci in connections {
-                if !c.live || !c.enrolled { continue; }
+                c.sequence = max(c.sequence, head);
+                if !c.live || c.sequence == tail { continue; }
                 if !c.ready {
-                    if !http::mail_live(c.address) { drop_connection(ci); } else { remaining = true; }
+                    if !http::mail_live(c.address) { drop_connection(ci); }
                     continue;
                 }
-                while c.subscription < 16 {
-                    let sub .= subscriptions[ci*16+c.subscription];
-                    if !matches(sub, c.user) { c.subscription++; c.offset = 0; continue; }
+                while c.sequence < tail {
+                    let slot = c.sequence % CABLE_WINDOW;
+                    let mask = targets[ci*CABLE_WINDOW+slot];
+                    if mask & 65535 == 0 {
+                        // A final send keeps its completion credit until the next drain event.
+                        if mask & CABLE_ENROLLED != 0 { window[slot].remaining--; targets[ci*CABLE_WINDOW+slot] = 0; }
+                        c.sequence++; c.offset = 0;
+                        continue;
+                    }
+                    var subscription: i64 = 0;
+                    while mask & (1 << subscription) == 0 { subscription++; }
+                    let sub .= subscriptions[ci*16+subscription];
+                    let payload = window[slot].body;
                     prefix.clear(); prefix.append("{\"identifier\":");
                     json::format_string(prefix, sub.identifier); prefix.append(",\"message\":");
-                    let length = prefix.len + body.len + 1;
+                    let length = prefix.len + payload.len + 1;
                     let end = min(c.offset + 8192, length);
                     chunk.clear();
                     if c.offset < prefix.len { chunk.append(prefix[c.offset..min(end, prefix.len)]); }
                     let start = max(c.offset, prefix.len);
-                    let stop = min(end, prefix.len + body.len);
-                    if start < stop { chunk.append(body[start-prefix.len..stop-prefix.len]); }
+                    let stop = min(end, prefix.len + payload.len);
+                    if start < stop { chunk.append(payload[start-prefix.len..stop-prefix.len]); }
                     if end == length { chunk.push('}'); }
                     let tag = ((if c.offset == 0 { 1 } else { 0 }) | (if end == length { 128 } else { 0 })) as i32;
                     let sent = http::mail_send(c.address, tag, chunk);
                     if sent == http::STALE { drop_connection(ci); break; }
                     if sent == http::SENT {
                         c.ready = false; c.offset = end;
-                        if end == length { c.subscription++; c.offset = 0; }
+                        if end == length {
+                            targets[ci*CABLE_WINDOW+slot] &= ~(1 << subscription); c.offset = 0;
+                            if sub.retiring { storage.free_slice(sub.identifier); subscriptions[ci*16+subscription].retiring = false; }
+                        }
                     }
                     break;
                 }
-                if c.live && (c.subscription < 16 || !c.ready) { remaining = true; }
-                else { c.enrolled = false; }
             }
-            if remaining { break; }
-            let sent = http::mail_send(reply, CABLE_ACK, "");
-            if sent == http::FULL { break; }
-            active = false; body.clear();
-            assert(qput(CablePermit { .. }));
+            let previous = head;
+            // Retire in publication order, including writes whose HTTP client disconnected.
+            while head < tail {
+                let slot = head % CABLE_WINDOW;
+                if window[slot].remaining != 0 { break; }
+                if http::mail_send(window[slot].reply, CABLE_ACK, "") == http::FULL { break; }
+                publications.free_slice(window[slot].body);
+                head++;
+                assert(qput(CablePermit { .. }));
+            }
+            if head == previous { break; }
         }
     }
 }

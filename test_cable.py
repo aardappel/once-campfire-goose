@@ -196,21 +196,23 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
                     break
                 time.sleep(.02)
             assert current == (0, None), current
-            slow, fast = WebSocket(port, cookie, receive_buffer=1024), WebSocket(port, cookie)
-            sockets.extend([slow, fast])
-            assert slow.subscribe(identifier) == fast.subscribe(identifier) == "confirm_subscription"
-            received, reader_errors = [], []
-            def read_pressure():
+            slow, fast, peer = WebSocket(port, cookie, receive_buffer=1024), WebSocket(port, cookie), WebSocket(port, cookie)
+            sockets.extend([slow, fast, peer])
+            assert slow.subscribe(identifier) == fast.subscribe(identifier) == peer.subscribe(identifier) == "confirm_subscription"
+            received, peer_received, late_received, reader_errors = [], [], [], []
+            def read_pressure(connection, destination):
                 try:
                     while True:
-                        message = fast.publication()
+                        message = connection.publication()
                         if "pressure-finished" in message:
                             return
-                        received.append(re.search(r"pressure-item-\d+", message)[0])
+                        destination.append(re.search(r"pressure-item-\d+", message)[0])
                 except BaseException as error:
                     reader_errors.append(error)
-            reader = threading.Thread(target=read_pressure, daemon=True)
-            reader.start()
+            readers = [threading.Thread(target=read_pressure, args=(connection, destination), daemon=True)
+                       for connection, destination in ((fast, received), (peer, peer_received))]
+            for reader in readers:
+                reader.start()
             def message_count():
                 with sqlite3.connect(database) as db:
                     return db.execute("SELECT count(*) FROM messages").fetchone()[0]
@@ -234,7 +236,13 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
                     else:
                         raise AssertionError("slow reader did not apply back-pressure")
                     blocked = post
-                    for _ in range(63):
+                    marker = f"pressure-item-{len(accepted)}"
+                    abandoned = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
+                    abandoned.request("POST", "/rooms/1/messages",
+                                      urlencode({"message[body]": marker, "message[client_message_id]": marker}),
+                                      {"Cookie": cookie, "Content-Type": "application/x-www-form-urlencoded"})
+                    accepted.append((marker, None))
+                    for _ in range(62):
                         marker = f"pressure-item-{len(accepted)}"
                         accepted.append((marker, pool.submit(request, "/rooms/1/messages",
                                                              {"message[body]": marker, "message[client_message_id]": marker}, cookie)))
@@ -242,7 +250,21 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
                     while message_count() < start_count + len(accepted) and time.monotonic() < deadline:
                         time.sleep(.02)
                     assert message_count() == start_count + len(accepted), "admitted writes did not commit"
+                    abandoned.close()
                     assert not blocked.done(), "acknowledged before the stalled reader drained"
+                    # Eight publications can progress independently; a stalled reader holds retirement.
+                    deadline = time.monotonic() + 3
+                    while min(len(received), len(peer_received)) < i + 8 and time.monotonic() < deadline:
+                        time.sleep(.01)
+                    assert len(received) == len(peer_received) == i + 8, "bounded pipeline did not advance fast readers"
+                    active = received.copy()
+                    assert peer_received == active, "readers disagree on publication order"
+                    late = WebSocket(port, cookie)
+                    sockets.append(late)
+                    assert late.subscribe(identifier) == "confirm_subscription"
+                    late_reader = threading.Thread(target=read_pressure, args=(late, late_received), daemon=True)
+                    readers.append(late_reader)
+                    late_reader.start()
                     retained = rss()
                     for _ in range(100):
                         status, _, body = request("/rooms/1/messages", {"message[body]": "pressure-rejected",
@@ -251,19 +273,25 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
                     assert message_count() == start_count + len(accepted), "rejected write mutated the database"
                     assert rss() - retained < 16 * 1024 * 1024, "rejected writes retained unbounded memory"
                     assert not blocked.done(), "stalled reader lost its drain credit"
+                    assert received == peer_received == active and not late_received, "pipeline exceeded its window or enrolled a late reader"
                     slow.close()
                     for _, result in accepted:
-                        assert result.result(timeout=10)[0] == 200
+                        if result is not None:
+                            assert result.result(timeout=10)[0] == 200
                     assert request("/rooms/1/messages", {"message[body]": "pressure-finished",
                                                         "message[client_message_id]": "pressure-finished"}, cookie)[0] == 200
-                    reader.join(timeout=10)
-                    assert not reader.is_alive() and not reader_errors, reader_errors
+                    for reader in readers:
+                        reader.join(timeout=10)
+                    assert not any(reader.is_alive() for reader in readers) and not reader_errors, reader_errors
                     assert len(received) == len(accepted) and set(received) == {marker for marker, _ in accepted}
                     assert received[:i+1] == [marker for marker, _ in accepted[:i+1]], "serial publications reordered"
+                    assert received == peer_received, "publication order changed across window reuse"
+                    assert late_received == received[len(active):], "late subscription inherited active publications"
                 finally:
                     slow.close()
                     fast.close()
-            print("PASS: signed subscriptions, fragmented and multi-subscription delivery, unsubscribe/reuse, ordering, 64-writer back-pressure, bounded rejected-write memory, drain acknowledgements, disconnect recovery and presence cleanup")
+                    peer.close()
+            print("PASS: signed subscriptions, fragmented and multi-subscription delivery, unsubscribe/reuse, ordered eight-publication pipelining, late enrollment, 64-writer back-pressure, bounded rejected-write memory, drain acknowledgements, disconnect recovery and presence cleanup")
         except BaseException:
             log.seek(0)
             print(log.read(), file=sys.stderr)

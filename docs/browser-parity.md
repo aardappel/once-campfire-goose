@@ -26,16 +26,23 @@ messages with concurrent incoming commands, multiple subscriptions per connectio
 duplicate subscriptions, unsubscribe/slot reuse, publication ordering, and presence cleanup.
 A stalled-reader case fills all 64 publication permits, checks that committed writes remain
 unacknowledged, rejects 100 additional writes without database changes or retained-memory
-growth above a 16 MiB allowance, and verifies complete recovery after disconnect.
+growth above a 16 MiB allowance, and verifies complete recovery after disconnect. Two fast
+readers advance through exactly eight active publications while the slow reader is stalled.
+They receive the same ordered sequence across window reuse; a late subscriber receives
+only publications enrolled after it joins.
 First-run and HTTP regression tests continue to check authorization,
 atomic persistence, write rollback, cache invalidation, and concurrent posting.
 
 ## Delivery contract
 
 Each admitted mutating HTTP request reserves one of 64 publication permits before writing.
-An asynchronous broker serializes broadcasts; each reader receives at most one 8 KiB batch
-per goose-http drain credit. It retains one encoded publication while delivering to its
-subscribers. Client commands received between fragments wait in a bounded 64 KiB buffer.
+An asynchronous broker pipelines at most eight publications; each reader receives at most
+one 8 KiB batch per goose-http drain credit and completes its publications in order. The
+broker retains one encoded body per active publication, shared by all its readers, and
+snapshots the matching subscriptions when each publication enters the window. Subscriptions
+added later do not inherit active publications. An unsubscribe cancels unsent deliveries;
+an already-started WebSocket message finishes before its identifier can be reused.
+Client commands received between fragments wait in a bounded 64 KiB buffer.
 The broker processes at most 128 queued commands before a delivery pass, keeps at most
 16 subscriptions in each connection, and assembles batches with bulk slice copies into
 one reusable buffer. A generation-checked mailbox send detects stale ready readers;
@@ -44,7 +51,12 @@ Disconnected readers are removed. A message POST is acknowledged only after its 
 commits and every enrolled subscriber's batches have reached their socket, or the subscriber
 disconnects. Socket acceptance does not prove that a browser has processed the message.
 
-A stalled subscriber can delay unrelated publications, because the broker serializes them.
+A stalled subscriber holds retirement of its publication and all later acknowledgements.
+Other readers can advance within the eight-publication window; the broker admits another
+publication to the window only after the oldest one completes and its acknowledgement is
+accepted or its HTTP recipient disconnects. The 64 admission permits cover queued and active
+publications together. Encoded body storage is reused after retirement, and connection
+metadata holds eight subscription masks rather than a growing per-reader queue.
 The HTTP wait expires after 60 seconds, but the committed message remains in the database.
 Admission exhaustion returns 503 before a new write starts. This trades availability for
 bounded outstanding delivery and avoids silently dropping accepted messages.
