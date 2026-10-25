@@ -15,7 +15,7 @@ struct CableCommand {
     kind: i32, address: http::MailAddress, user: i64 = 0, room: i64 = 0,
     stream: i32 = 0, data: u8[]
 }
-struct CableSubscriber { live: bool = false, connection: i64, room: i64, stream: i32, identifier: u8[:] }
+struct CableSubscriber { live: bool = false, room: i64, stream: i32, identifier: u8[:] }
 struct CableConnection {
     live: bool = false, address: http::MailAddress, user: i64,
     ready: bool = true, subscription: i64 = 0, offset: i64 = 0, enrolled: bool = false
@@ -39,9 +39,12 @@ fn publish(room: i64, reply: http::MailAddress, body: const u8[:]) {
 
 thread_fn cable_broker() {
     var connections: CableConnection[>..] = [];
+    // Each connection owns 16 contiguous slots; connection scans do not copy their payloads.
     var subscriptions: CableSubscriber[>..] = [];
     reusable[] var storage: u8[>..] = [];
     var body: u8[>..] = [];
+    var prefix: u8[>..] = [];
+    var chunk: u8[>..] = [];
     var reply = http::MailAddress { .. };
     var room: i64 = 0;
     var active = false;
@@ -49,48 +52,61 @@ thread_fn cable_broker() {
     fn drop_connection(index: i64) {
         connections[index].live = false;
         connections[index].enrolled = false;
-        for &sub in subscriptions {
-            if sub.live && sub.connection == index {
+        for &sub in subscriptions[index*16..index*16+16] {
+            if sub.live {
                 storage.free_slice(sub.identifier);
                 sub.live = false;
             }
         }
     }
-    fn matches(sub: const CableSubscriber&) -> bool {
-        return sub.live && (if room==0 { sub.stream==2 } else if room<0 { sub.stream==5 && connections[sub.connection].user == -room } else { sub.stream==1 && sub.room==room });
+    fn matches(sub: const CableSubscriber&, user: i64) -> bool {
+        return sub.live && (if room==0 { sub.stream==2 } else if room<0 { sub.stream==5 && user == -room } else { sub.stream==1 && sub.room==room });
     }
-    loop {
-        let command = qget<CableCommand>();
+    fn apply_command(command: const CableCommand&) {
         var index: i64 = -1;
-        for c, i in connections { if c.live && c.address == command.address { index = i; break; } }
+        for &c, i in connections { if c.live && c.address == command.address { index = i; break; } }
         if command.kind == CABLE_JOIN {
             if index < 0 {
-                for c, i in connections { if !c.live { index = i; break; } }
-                if index < 0 { index = connections.len; connections.push(CableConnection { address: command.address, user: command.user, .. }); }
+                for &c, i in connections { if !c.live { index = i; break; } }
+                if index < 0 {
+                    index = connections.len;
+                    connections.push(CableConnection { address: command.address, user: command.user, .. });
+                    for _ in 0..16 { subscriptions.push(CableSubscriber { .. }); }
+                }
                 connections[index] = CableConnection { live: true, address: command.address, user: command.user, .. };
             }
             var duplicate = false;
             var slot: i64 = -1;
             var count: i64 = 0;
-            for sub, i in subscriptions {
-                if sub.live && sub.connection == index { count++; if sub.identifier == command.data { duplicate = true; } }
+            for sub, i in subscriptions[index*16..index*16+16] {
+                if sub.live { count++; if sub.identifier == command.data { duplicate = true; } }
                 if !sub.live { slot = i; }
             }
             if !duplicate && count < 16 {
                 let id = storage.alloc_slice(command.data.len); copy_into(id, command.data);
-                let sub = CableSubscriber { live: true, connection: index, room: command.room, stream: command.stream, identifier: id };
-                if slot < 0 { subscriptions.push(sub); } else { subscriptions[slot] = sub; }
+                let sub = CableSubscriber { live: true, room: command.room, stream: command.stream, identifier: id };
+                subscriptions[index*16+slot] = sub;
             }
         } else if index >= 0 && command.kind == CABLE_CREDIT {
             connections[index].ready = true;
         } else if index >= 0 && command.kind == CABLE_LEAVE {
             drop_connection(index);
         } else if index >= 0 && command.kind == CABLE_UNSUBSCRIBE {
-            for &sub in subscriptions {
-                if sub.live && sub.connection == index && sub.identifier == command.data {
+            for &sub in subscriptions[index*16..index*16+16] {
+                if sub.live && sub.identifier == command.data {
                     storage.free_slice(sub.identifier); sub.live = false;
                 }
             }
+        }
+    }
+    loop {
+        let first = qget<CableCommand>();
+        apply_command(first);
+        // Bound control processing so a busy command queue cannot starve delivery.
+        for _ in 0..127 {
+            let command, exists = qpoll<CableCommand>();
+            if !exists { break; }
+            apply_command(command);
         }
         loop {
             if !active {
@@ -99,10 +115,12 @@ thread_fn cable_broker() {
                 body.clear();
                 room = pending.room; reply = pending.reply; active = true;
                 var observed = false;
-                for &c in connections { c.enrolled = false; c.subscription = 0; c.offset = 0; }
-                for sub in subscriptions {
-                    if matches(sub) && connections[sub.connection].live {
-                        connections[sub.connection].enrolled = true; observed = true;
+                for &c, ci in connections {
+                    c.enrolled = false; c.subscription = 0; c.offset = 0;
+                    if c.live {
+                        for sub in subscriptions[ci*16..ci*16+16] {
+                            if matches(sub, c.user) { c.enrolled = true; observed = true; break; }
+                        }
                     }
                 }
                 if observed { json::format_string(body, pending.body); }
@@ -110,19 +128,23 @@ thread_fn cable_broker() {
             var remaining = false;
             for &c, ci in connections {
                 if !c.live || !c.enrolled { continue; }
-                if !http::mail_live(c.address) { drop_connection(ci); continue; }
-                if !c.ready { remaining = true; continue; }
-                while c.subscription < subscriptions.len {
-                    let sub .= subscriptions[c.subscription];
-                    if !matches(sub) || sub.connection != ci { c.subscription++; c.offset = 0; continue; }
-                    var prefix: u8[>..] = []; prefix.append("{\"identifier\":");
+                if !c.ready {
+                    if !http::mail_live(c.address) { drop_connection(ci); } else { remaining = true; }
+                    continue;
+                }
+                while c.subscription < 16 {
+                    let sub .= subscriptions[ci*16+c.subscription];
+                    if !matches(sub, c.user) { c.subscription++; c.offset = 0; continue; }
+                    prefix.clear(); prefix.append("{\"identifier\":");
                     json::format_string(prefix, sub.identifier); prefix.append(",\"message\":");
                     let length = prefix.len + body.len + 1;
                     let end = min(c.offset + 8192, length);
-                    var chunk: u8[>..] = [];
-                    for pos in c.offset..end {
-                        chunk.push(if pos < prefix.len { prefix[pos] } else if pos < prefix.len + body.len { body[pos-prefix.len] } else { '}' });
-                    }
+                    chunk.clear();
+                    if c.offset < prefix.len { chunk.append(prefix[c.offset..min(end, prefix.len)]); }
+                    let start = max(c.offset, prefix.len);
+                    let stop = min(end, prefix.len + body.len);
+                    if start < stop { chunk.append(body[start-prefix.len..stop-prefix.len]); }
+                    if end == length { chunk.push('}'); }
                     let tag = ((if c.offset == 0 { 1 } else { 0 }) | (if end == length { 128 } else { 0 })) as i32;
                     let sent = http::mail_send(c.address, tag, chunk);
                     if sent == http::STALE { drop_connection(ci); break; }
@@ -132,7 +154,7 @@ thread_fn cable_broker() {
                     }
                     break;
                 }
-                if c.live && (c.subscription < subscriptions.len || !c.ready) { remaining = true; }
+                if c.live && (c.subscription < 16 || !c.ready) { remaining = true; }
                 else { c.enrolled = false; }
             }
             if remaining { break; }

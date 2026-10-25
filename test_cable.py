@@ -14,13 +14,18 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from urllib.parse import urlencode
 
 
 class WebSocket:
-    def __init__(self, port, cookie):
-        self.sock = socket.create_connection(("127.0.0.1", port), timeout=15)
+    def __init__(self, port, cookie, receive_buffer=None):
+        self.sock = socket.socket()
+        self.sock.settimeout(15)
+        if receive_buffer is not None:
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, receive_buffer)
+        self.sock.connect(("127.0.0.1", port))
         self.sock.sendall((f"GET /cable HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
                            "Upgrade: websocket\r\nConnection: Upgrade\r\n"
                            "Sec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: actioncable-v1-json\r\n"
@@ -55,10 +60,12 @@ class WebSocket:
 
     def subscribe(self, identifier, fragmented=False):
         self.send({"command": "subscribe", "identifier": identifier}, fragmented)
-        while True:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
             message = self.receive()
             if message.get("identifier") == identifier and "type" in message:
                 return message["type"]
+        raise TimeoutError("subscription response did not arrive")
 
     def receive(self, on_fragment=None):
         result = bytearray()
@@ -82,10 +89,12 @@ class WebSocket:
                 on_fragment = None
 
     def publication(self, on_fragment=None):
-        while True:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
             message = self.receive(on_fragment)
             if isinstance(message.get("message"), str):
                 return message["message"]
+        raise TimeoutError("publication did not arrive")
 
     def close(self):
         self.sock.close()
@@ -140,6 +149,40 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
                 assert "&amp;" * 40000 in received
                 assert second.publication() == received
                 assert post.result()[0] == 200
+                aliases = [json.dumps({"channel": "RoomMessagesChannel", "signed_stream_name": signed,
+                                       "padding": "\n\"\\" * size}) for size in (0, 70, 250)]
+                for alias in aliases:
+                    assert second.subscribe(alias) == "confirm_subscription"
+                assert second.subscribe(identifier) == "confirm_subscription"
+                for size in (0, 7500, 16000):
+                    marker = f"ordered-publication-{size}"
+                    post = pool.submit(request, "/rooms/1/messages",
+                                       {"message[body]": marker + "x" * size, "message[client_message_id]": marker}, cookie)
+                    expected = first.publication()
+                    delivered = {}
+                    while len(delivered) < 4:
+                        event = second.receive()
+                        if isinstance(event.get("message"), str):
+                            assert event["identifier"] not in delivered, "duplicate subscription delivery"
+                            delivered[event["identifier"]] = event["message"]
+                    assert set(delivered) == {identifier, *aliases}
+                    assert all(value == expected and marker in value for value in delivered.values())
+                    assert post.result()[0] == 200
+                for alias in aliases:
+                    second.send({"command": "unsubscribe", "identifier": alias})
+                assert second.subscribe(aliases[0]) == "confirm_subscription"
+                post = pool.submit(request, "/rooms/1/messages", {"message[body]": "reused-subscription",
+                                                               "message[client_message_id]": "reused-subscription"}, cookie)
+                expected = first.publication()
+                delivered = []
+                while len(delivered) < 2:
+                    event = second.receive()
+                    if isinstance(event.get("message"), str):
+                        assert event["message"] == expected
+                        delivered.append(event["identifier"])
+                assert set(delivered) == {identifier, aliases[0]}
+                assert post.result()[0] == 200
+                second.send({"command": "unsubscribe", "identifier": aliases[0]})
                 # A disconnect during an outstanding publication cannot block the remaining reader.
                 post = pool.submit(request, "/rooms/1/messages", {"message[body]": "after disconnect", "message[client_message_id]": "disconnect-publication"}, cookie)
                 first.close()
@@ -153,7 +196,74 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
                     break
                 time.sleep(.02)
             assert current == (0, None), current
-            print("PASS: signed subscription rejection, two-reader fan-out, 200 KiB fragmented delivery with concurrent commands, acknowledged writes, disconnect recovery and presence cleanup")
+            slow, fast = WebSocket(port, cookie, receive_buffer=1024), WebSocket(port, cookie)
+            sockets.extend([slow, fast])
+            assert slow.subscribe(identifier) == fast.subscribe(identifier) == "confirm_subscription"
+            received, reader_errors = [], []
+            def read_pressure():
+                try:
+                    while True:
+                        message = fast.publication()
+                        if "pressure-finished" in message:
+                            return
+                        received.append(re.search(r"pressure-item-\d+", message)[0])
+                except BaseException as error:
+                    reader_errors.append(error)
+            reader = threading.Thread(target=read_pressure, daemon=True)
+            reader.start()
+            def message_count():
+                with sqlite3.connect(database) as db:
+                    return db.execute("SELECT count(*) FROM messages").fetchone()[0]
+            def rss():
+                status = Path(f"/proc/{server.pid}/status").read_text()
+                return int(re.search(r"^VmRSS:\s+(\d+)", status, re.M)[1]) * 1024
+            start_count = message_count()
+            accepted = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=64) as pool:
+                try:
+                    # Fill the slow reader's TCP window before checking application back-pressure.
+                    for i in range(64):
+                        marker = f"pressure-item-{i}"
+                        post = pool.submit(request, "/rooms/1/messages",
+                                           {"message[body]": marker + "&" * 40000, "message[client_message_id]": marker}, cookie)
+                        accepted.append((marker, post))
+                        try:
+                            assert post.result(timeout=.5)[0] == 200
+                        except concurrent.futures.TimeoutError:
+                            break
+                    else:
+                        raise AssertionError("slow reader did not apply back-pressure")
+                    blocked = post
+                    for _ in range(63):
+                        marker = f"pressure-item-{len(accepted)}"
+                        accepted.append((marker, pool.submit(request, "/rooms/1/messages",
+                                                             {"message[body]": marker, "message[client_message_id]": marker}, cookie)))
+                    deadline = time.monotonic() + 5
+                    while message_count() < start_count + len(accepted) and time.monotonic() < deadline:
+                        time.sleep(.02)
+                    assert message_count() == start_count + len(accepted), "admitted writes did not commit"
+                    assert not blocked.done(), "acknowledged before the stalled reader drained"
+                    retained = rss()
+                    for _ in range(100):
+                        status, _, body = request("/rooms/1/messages", {"message[body]": "pressure-rejected",
+                                                                      "message[client_message_id]": "pressure-rejected"}, cookie)
+                        assert status == 503 and "Live delivery is busy" in body, (status, body)
+                    assert message_count() == start_count + len(accepted), "rejected write mutated the database"
+                    assert rss() - retained < 16 * 1024 * 1024, "rejected writes retained unbounded memory"
+                    assert not blocked.done(), "stalled reader lost its drain credit"
+                    slow.close()
+                    for _, result in accepted:
+                        assert result.result(timeout=10)[0] == 200
+                    assert request("/rooms/1/messages", {"message[body]": "pressure-finished",
+                                                        "message[client_message_id]": "pressure-finished"}, cookie)[0] == 200
+                    reader.join(timeout=10)
+                    assert not reader.is_alive() and not reader_errors, reader_errors
+                    assert len(received) == len(accepted) and set(received) == {marker for marker, _ in accepted}
+                    assert received[:i+1] == [marker for marker, _ in accepted[:i+1]], "serial publications reordered"
+                finally:
+                    slow.close()
+                    fast.close()
+            print("PASS: signed subscriptions, fragmented and multi-subscription delivery, unsubscribe/reuse, ordering, 64-writer back-pressure, bounded rejected-write memory, drain acknowledgements, disconnect recovery and presence cleanup")
         except BaseException:
             log.seek(0)
             print(log.read(), file=sys.stderr)
