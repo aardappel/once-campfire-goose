@@ -1,5 +1,8 @@
 # Epoll default and current Campfire comparison
 
+These are the pre-optimization backend results. See the newer
+[publication broker comparison](broker-optimization.md) for the current application.
+
 Measured on 2026-10-24, with unpatched goose-http v0.5.11 and goose-compress
 v0.1.4. Epoll is the default for the Linux application. Ordinary Docker and the
 shared verifier do not allow the io_uring syscalls; calling `serve` there uses

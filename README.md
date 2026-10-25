@@ -61,19 +61,20 @@ See the [dependency history](patches/README.md) and [reproducer](docs/websocket-
 
 `test_server.py`, native unit tests, and the differential rendering tests are preserved from
 the experiment. Historical results and limitations are in [docs/experiment.md](docs/experiment.md).
-The [current comparison](docs/backend-selection.md) uses packaged images, current Rust/Jai references,
-the unchanged shared load generator and validators, and audited writes. It records throughput,
-memory, exact versions, and workload limits. The old Jai `e56ba63` measurements do not describe
-the current `2ecd487` comparison. See [cache validation](docs/read-cache.md) for the read path.
+The [current broker comparison](docs/broker-optimization.md) uses packaged images, current
+Rust/Jai references, the unchanged shared load generator and validators, and audited writes.
+It records throughput, memory, exact versions, host activity, and workload limits.
+See [cache validation](docs/read-cache.md) for the read path and the historical
+[backend comparison](docs/backend-selection.md) for epoll versus ring modes.
 
-On 2026-10-24, Goose with epoll reaches median rates of 386.6k room reads/s and 6.1k
-posts/s without subscribers, versus Jai's 316.7k and 4.3k, and Rust's 19.4k and 3.5k.
-For complete delivery to 64 subscribers, Goose reaches 647 messages/s, versus Jai's
-3,379 and Rust's 2,288. Goose leads these HTTP workloads but has a substantial
-live-delivery gap. Anonymous memory after room reads is 22.55 MiB, versus Jai's
-21.41 and Rust's 36.41. Epoll uses 23.5% less sampled read memory than emulation
-in the separate same-binary backend comparison. The report records individual
-samples, the rejected 256-writer stress run, validation, host activity and limits.
+On 2026-10-25, Goose with epoll reaches medians of 387.5k room reads/s and
+6.2k posts/s without subscribers, versus Jai's 313.1k and 4.3k, and Rust's
+19.2k and 3.5k. The optimized broker delivers 984 messages/s to all 64 subscribers,
+up 52% from 648. Jai reaches 3,326 and Rust 2,312; the fan-out gap remains.
+Sampled anonymous memory after fan-out is 26.61 MiB, versus 28.55 before. Room reads are
+2.7% below the bracketed baseline, while retaining a 24% lead over Jai. Rendering,
+bounded admission, drain acknowledgements and delivery validation pass. The report preserves
+individual samples and the remaining limitations; this is not a general language-speed claim.
 
 The [send-copy measurements](docs/send-copy.md) and
 [upstream review](docs/send-copy-pr.md) remain as historical evidence for the retired
