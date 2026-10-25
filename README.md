@@ -61,20 +61,21 @@ See the [dependency history](patches/README.md) and [reproducer](docs/websocket-
 
 `test_server.py`, native unit tests, and the differential rendering tests are preserved from
 the experiment. Historical results and limitations are in [docs/experiment.md](docs/experiment.md).
-The [current broker comparison](docs/broker-optimization.md) uses packaged images, current
+The [current publication-pipeline comparison](docs/publication-pipeline.md) uses packaged images, current
 Rust/Jai references, the unchanged shared load generator and validators, and audited writes.
 It records throughput, memory, exact versions, host activity, and workload limits.
 See [cache validation](docs/read-cache.md) for the read path and the historical
 [backend comparison](docs/backend-selection.md) for epoll versus ring modes.
 
-On 2026-10-25, Goose with epoll reaches medians of 387.5k room reads/s and
-6.2k posts/s without subscribers, versus Jai's 313.1k and 4.3k, and Rust's
-19.2k and 3.5k. The optimized broker delivers 984 messages/s to all 64 subscribers,
-up 52% from 648. Jai reaches 3,326 and Rust 2,312; the fan-out gap remains.
-Sampled anonymous memory after fan-out is 26.61 MiB, versus 28.55 before. Room reads are
-2.7% below the bracketed baseline, while retaining a 24% lead over Jai. Rendering,
-bounded admission, drain acknowledgements and delivery validation pass. The report preserves
-individual samples and the remaining limitations; this is not a general language-speed claim.
+On 2026-10-25, Goose with epoll reaches medians of 382.4k room reads/s and
+6.0k posts/s without subscribers, versus Jai's 314.8k and 4.2k.
+Bounded publication pipelining delivers 1,587 messages/s to all 64 readers,
+a 41% increase over the serial broker's 1,125. Jai reaches
+3,324 and Rust 2,236; the fan-out gap remains.
+Anonymous memory after fan-out is 26.68 MiB, versus 26.75 before.
+Rendering parity, bounded admission and drain acknowledgement tests pass. The report
+preserves individual samples, host activity and compatibility limits; these are
+workload-specific application results, not a general language-speed claim.
 
 The [send-copy measurements](docs/send-copy.md) and
 [upstream review](docs/send-copy-pr.md) remain as historical evidence for the retired

@@ -1,5 +1,7 @@
 # Publication broker optimization
 
+The subsequent [bounded publication pipeline](publication-pipeline.md) has the current results.
+
 Measured on 2026-10-25. This report compares the original epoll application with
 experimental revision `53f092f` and the same pinned Rust/Jai images. The HTTP
 library, compression package, compiler, verifier, renderer and delivery limits
