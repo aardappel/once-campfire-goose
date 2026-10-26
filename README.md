@@ -62,24 +62,31 @@ See the [dependency history](patches/README.md) and [reproducer](docs/websocket-
 
 `test_server.py`, native unit tests, and the differential rendering tests are preserved from
 the experiment. Historical results and limitations are in [docs/experiment.md](docs/experiment.md).
-The [current acknowledgement-policy comparison](docs/queued-acknowledgements.md) uses packaged images, current
-Rust/Jai references, the unchanged shared load generator and validators, and audited writes.
-It records throughput, memory, exact versions, host activity, and workload limits.
+The [current queue-capacity comparison](docs/publication-queue-sizes.md) uses packaged images,
+the unchanged shared load generator and validators, audited writes, and 15 guarded rounds
+against current Jai. It records throughput, latency, memory, exact versions and every sample.
 See [cache validation](docs/read-cache.md) for the read path and the historical
 [backend comparison](docs/backend-selection.md) for epoll versus ring modes.
 
-On 2026-10-26 PDT, the default final-drain policy reaches medians of 394.9k room
-reads/s and 6.14k posts/s without subscribers, versus Jai's 322.0k and 4.32k.
-Complete delivery to all 64 readers reaches 1,642 messages/s, versus Rust's 2,297
-and Jai's 3,376. Anonymous memory after fan-out is 27.02 MiB, versus 89.89 for Rust
-and 83.43 for Jai.
+On 2026-10-26 PDT, queued windows of 8, 32, 128 and 512 reach median complete fan-out
+rates of 2,031, 2,266, 2,434 and 2,322 messages/s to all 64 readers. Jai reaches 3,448.
+The 128-entry window gains 19.9% over queued-eight; Jai remains 1.42× faster. The cost
+is saturated delivery p99 of 66.43 ms, versus 13.10 at eight and 2.71 for Jai. Increasing
+to 512 adds latency (192.64 ms) without further measured throughput benefit.
 
-The separate `CAMPFIRE_PUBLICATION_ACK=queued` experiment reaches 2,038 complete
-fan-out messages/s using the same image, eight-publication window and 64 retained
-delivery permits. That is a 24.2% gain, closing 22.9% of the observed absolute gap
-to Jai. Sampled memory is similar (26.59 MiB), but delivery p99 increases from 5.66
-to 12.82 ms. The default remains final-drain acknowledgement. The report distinguishes
-this policy-only result from Jai's larger queues and preserves every sample.
+At 128, Goose reaches 391.4k cached room reads/s and 6.14k posts/s without subscribers,
+versus Jai's 316.6k and 4.41k. Anonymous memory after fan-out is 28.11 MiB versus 83.70
+for Jai. Large-message stalled-reader RSS rises from 33.49 MiB at eight to 56.36 at 128
+and 134.55 at 512; these pressure-test samples describe a different workload.
+
+All larger sizes remain opt-in: set `CAMPFIRE_PUBLICATION_ACK=queued` and
+`CAMPFIRE_PUBLICATION_WINDOW` to a power of two from 8 through 512. Total retained
+delivery permits equal the window plus 56 and are released only after final drain.
+The default remains final-drain acknowledgement with eight active publications and
+64 permits. The [earlier policy-only comparison](docs/queued-acknowledgements.md)
+records the separate 24.2% gain from queued acknowledgements at the original bounds.
+The report preserves an unreproduced native io_uring pressure-setup failure alongside
+passing reruns; all performance measurements use epoll.
 
 The [shared worker-dispatch experiment](docs/worker-dispatch.md) showed no reliable
 gain and remains retired. The application uses unpatched upstream goose-http.
