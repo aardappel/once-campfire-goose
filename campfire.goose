@@ -401,6 +401,13 @@ fn main() {
     }
     var profiling: u8[>..]=[];
     campfire_profile_enable(env("CAMPFIRE_PROFILE_WRITES",profiling) && profiling=="1");
+    var publication_ack: u8[>..]=[];
+    if env("CAMPFIRE_PUBLICATION_ACK",publication_ack) {
+        guard publication_ack=="drained" || publication_ack=="queued"
+            else {abort("CAMPFIRE_PUBLICATION_ACK must be drained or queued");}
+    }
+    let queued_ack = publication_ack=="queued";
+    write_stderr(str("Publication acknowledgement: ",if queued_ack {"queued"} else {"drained"},"\n"));
     var cfg = http::Config { address: "0.0.0.0", port: 3000, workers: 4, max_conns: 1024,
         mail_slots:128,mail_size:8192,max_waiting:1024,.. };
     cfg.emulate_ring=backend=="emulated";
@@ -421,7 +428,7 @@ fn main() {
     campfire::initialize_database(settings.database);
     qlimit<campfire::Publication>(64); qlimit<campfire::CablePermit>(64); qlimit<campfire::CableCommand>(65536);
     for i in 64 { qput(campfire::CablePermit { .. }); }
-    thread_spawn(campfire::cable_broker);
+    thread_spawn(campfire::cable_broker,queued_ack);
     qlimit<campfire::CheckpointJob>(1);
     let checkpointer=thread_spawn(campfire::checkpointer,copy(settings.database));
     http::run(cfg, worker);

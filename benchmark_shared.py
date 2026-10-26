@@ -108,6 +108,7 @@ def main():
     parser.add_argument("--apps", default="goose,rust,jai")
     parser.add_argument("--goose-image", default="once-campfire-goose:app")
     parser.add_argument("--goose-backend", choices=("auto", "epoll", "uring", "emulated"), help="override the Goose image's event loop")
+    parser.add_argument("--goose-publication-ack", choices=("drained", "queued"), default="drained", help="Goose publication acknowledgement experiment; delivery bounds stay unchanged")
     parser.add_argument("--goose-seccomp", type=Path, help="optional container policy for Goose, recorded by SHA-256")
     parser.add_argument("--rust-image", default="ghcr.io/basecamp/once-campfire-rust:main")
     parser.add_argument("--jai-image", default="ghcr.io/lucasmeijer/once-campfire-jai:2ecd487")
@@ -179,6 +180,7 @@ def main():
         "fanout_clients": args.fanout_clients,
         "profile_writes": args.profile_writes, "profiles": profiles, "read_routes": selected, "mixed_write_rate": 10, "gzip": True, "preflight_only": args.preflight_only,
         "goose_backend": args.goose_backend or "image default",
+        "goose_publication_ack": args.goose_publication_ack,
         "goose_seccomp": {"path": str(args.goose_seccomp.resolve()), "sha256": checksum(args.goose_seccomp)} if args.goose_seccomp else "Docker default",
         "validator_sha256": checksum(verification / "loadgen/src/validation.rs"),
         "contracts_sha256": checksum(verification / "bench/contracts.rb"),
@@ -221,6 +223,8 @@ def main():
                                   CAMPFIRE_RESPONSE_CACHE_MB="64", CAMPFIRE_PROFILE_WRITES="1" if args.profile_writes else "0")
                     if app=="goose" and args.goose_backend:
                         config["CAMPFIRE_HTTP_BACKEND"]=args.goose_backend
+                    if app=="goose":
+                        config["CAMPFIRE_PUBLICATION_ACK"]=args.goose_publication_ack
                     env_file = data / "server.env"
                     env_file.write_text("".join(f"{key}={value}\n" for key, value in config.items()))
                     os.chmod(env_file, 0o600)

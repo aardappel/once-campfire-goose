@@ -107,6 +107,7 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
         available.bind(("127.0.0.1", 0))
         port = available.getsockname()[1]
     environment = dict(os.environ, DATABASE_PATH=str(database), HTTP_PORT=str(port), SECRET_KEY_BASE=secrets.token_hex(64))
+    queued_ack = environment.get("CAMPFIRE_PUBLICATION_ACK", "drained") == "queued"
     if "--batch-pressure" in sys.argv[2:]:
         environment["CAMPFIRE_HTTP_THREADS"] = "1"
     with (work / "server.log").open("w+") as log:
@@ -259,7 +260,8 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
                                       urlencode({"message[body]": marker, "message[client_message_id]": marker}),
                                       {"Cookie": cookie, "Content-Type": "application/x-www-form-urlencoded"})
                     accepted.append((marker, None))
-                    for _ in range(62):
+                    # Queued success retains eight occupied delivery permits behind the stalled reader.
+                    for _ in range(54 if queued_ack else 62):
                         marker = f"pressure-item-{len(accepted)}"
                         accepted.append((marker, pool.submit(request, "/rooms/1/messages",
                                                              {"message[body]": marker + ("x" * (128 * (len(accepted) % 4)) if batch_pressure else "&" * (5000 * (len(accepted) % 4))), "message[client_message_id]": marker}, cookie)))
@@ -268,12 +270,15 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
                         time.sleep(.02)
                     assert message_count() == start_count + len(accepted), "admitted writes did not commit"
                     abandoned.close()
-                    assert not blocked.done(), "acknowledged before the stalled reader drained"
+                    assert not blocked.done(), "acknowledged without space in the delivery window"
                     # Eight publications can progress independently; a stalled reader holds retirement.
                     deadline = time.monotonic() + 3
-                    while min(len(received), len(peer_received)) < i + 8 and time.monotonic() < deadline:
+                    expected_active = i if queued_ack else i + 8
+                    while min(len(received), len(peer_received)) < expected_active and time.monotonic() < deadline:
                         time.sleep(.01)
-                    assert len(received) == len(peer_received) == i + 8, "bounded pipeline did not advance fast readers"
+                    assert len(received) == len(peer_received) == expected_active, "bounded pipeline did not advance fast readers"
+                    if queued_ack:
+                        assert i >= 8 and all(result.done() and result.result()[0] == 200 for _, result in accepted[i-8:i]), "queued acknowledgements waited for final drain"
                     active = received.copy()
                     assert peer_received == active, "readers disagree on publication order"
                     late = WebSocket(port, cookie)
@@ -308,7 +313,7 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
                     slow.close()
                     fast.close()
                     peer.close()
-            print("PASS: signed subscriptions, fragmented and multi-subscription delivery, unsubscribe/reuse, ordered eight-publication pipelining, late enrollment, 64-writer back-pressure, bounded rejected-write memory, drain acknowledgements, disconnect recovery and presence cleanup")
+            print(f"PASS: signed subscriptions, fragmented and multi-subscription delivery, unsubscribe/reuse, ordered eight-publication pipelining, late enrollment, 64 retained delivery permits, bounded rejected-write memory, {'queued' if queued_ack else 'drained'} acknowledgements, disconnect recovery and presence cleanup")
         except BaseException:
             log.seek(0)
             print(log.read(), file=sys.stderr)

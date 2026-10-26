@@ -18,6 +18,8 @@ if [ "${1:-}" != "--build-only" ]; then
     for backend in auto epoll emulated; do
         CAMPFIRE_HTTP_BACKEND="$backend" python3 test_cable.py build/campfire
         CAMPFIRE_HTTP_BACKEND="$backend" python3 test_cable.py build/campfire --batch-pressure
+        CAMPFIRE_PUBLICATION_ACK=queued CAMPFIRE_HTTP_BACKEND="$backend" python3 test_cable.py build/campfire
+        CAMPFIRE_PUBLICATION_ACK=queued CAMPFIRE_HTTP_BACKEND="$backend" python3 test_cable.py build/campfire --batch-pressure
         CAMPFIRE_HTTP_BACKEND="$backend" python3 test_server.py build/campfire
         CAMPFIRE_HTTP_BACKEND="$backend" python3 test_server.py build/campfire --no-cache
     done

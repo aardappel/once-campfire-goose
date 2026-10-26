@@ -35,12 +35,12 @@ fn cable_command(kind: i32, address: http::MailAddress) {
 }
 
 fn publish(room: i64, reply: http::MailAddress, body: const u8[:]) {
-    // Each admitted HTTP writer owns one permit until its acknowledgement.
+    // Each publication owns one permit until final delivery, including queued acknowledgements.
     assert(qput(Publication { room: room, reply: reply, body: sql_text(body) }));
     cable_command(CABLE_PUBLISH, reply);
 }
 
-thread_fn cable_broker() {
+thread_fn cable_broker(queued_ack: bool) {
     var connections: CableConnection[>..] = [];
     // Each connection owns 16 contiguous slots; connection scans do not copy their payloads.
     var subscriptions: CableSubscriber[>..] = [];
@@ -51,6 +51,7 @@ thread_fn cable_broker() {
     var window: CableDelivery[8] = [CableDelivery { .. }; 8];
     var head: i64 = 0;
     var tail: i64 = 0;
+    var acknowledged: i64 = 0;
     var body: u8[>..] = [];
     var prefix: u8[>..] = [];
     var chunk: u8[>..] = [];
@@ -150,6 +151,14 @@ thread_fn cable_broker() {
                 window[slot].body = encoded;
                 tail++;
             }
+            if queued_ack {
+                // Enrollment and payload retention precede success; drain credits still own retirement.
+                while acknowledged < tail {
+                    let slot = acknowledged % CABLE_WINDOW;
+                    if http::mail_send(window[slot].reply, CABLE_ACK, "") == http::FULL { break; }
+                    acknowledged++;
+                }
+            }
             for &c, ci in connections {
                 c.sequence = max(c.sequence, head);
                 if !c.live || c.sequence == tail { continue; }
@@ -198,7 +207,9 @@ thread_fn cable_broker() {
             while head < tail {
                 let slot = head % CABLE_WINDOW;
                 if window[slot].remaining != 0 { break; }
-                if http::mail_send(window[slot].reply, CABLE_ACK, "") == http::FULL { break; }
+                if queued_ack {
+                    if head == acknowledged { break; }
+                } else if http::mail_send(window[slot].reply, CABLE_ACK, "") == http::FULL { break; }
                 publications.free_slice(window[slot].body);
                 head++;
                 assert(qput(CablePermit { .. }));
