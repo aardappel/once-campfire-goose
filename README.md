@@ -62,26 +62,29 @@ See the [dependency history](patches/README.md) and [reproducer](docs/websocket-
 
 `test_server.py`, native unit tests, and the differential rendering tests are preserved from
 the experiment. Historical results and limitations are in [docs/experiment.md](docs/experiment.md).
-The [current worker-dispatch comparison](docs/worker-dispatch.md) uses packaged images, current
+The [current acknowledgement-policy comparison](docs/queued-acknowledgements.md) uses packaged images, current
 Rust/Jai references, the unchanged shared load generator and validators, and audited writes.
 It records throughput, memory, exact versions, host activity, and workload limits.
 See [cache validation](docs/read-cache.md) for the read path and the historical
 [backend comparison](docs/backend-selection.md) for epoll versus ring modes.
 
-On 2026-10-25 PDT, the retained Goose pipeline with epoll reaches medians of
-399.5k room reads/s and 6.17k posts/s without subscribers, versus Jai's 322.6k and
-4.35k. Complete delivery to all 64 readers reaches 1,767 messages/s, versus Rust's
-2,343 and Jai's 3,440. Anonymous memory after fan-out is 28.04 MiB, versus 91.52
-for Rust and 82.71 for Jai.
+On 2026-10-26 PDT, the default final-drain policy reaches medians of 394.9k room
+reads/s and 6.14k posts/s without subscribers, versus Jai's 322.0k and 4.32k.
+Complete delivery to all 64 readers reaches 1,642 messages/s, versus Rust's 2,297
+and Jai's 3,376. Anonymous memory after fan-out is 27.02 MiB, versus 89.89 for Rust
+and 83.43 for Jai.
 
-Shared worker dispatch reached a median of 1,756 messages/s and showed no reliable
-fan-out gain. That extension is retired; its code, tests, profiles and measurements
-remain in Git and the report. The default uses the existing bounded publication
-pipeline and unpatched upstream goose-http. Rendering parity, bounded admission
-and final-drain acknowledgement tests pass. Jai normally acknowledges queued
-frames, allowing different delivery overlap; the report documents that distinction
-without claiming to quantify its effect. These are workload-specific application
-results, not a general language-speed claim.
+The separate `CAMPFIRE_PUBLICATION_ACK=queued` experiment reaches 2,038 complete
+fan-out messages/s using the same image, eight-publication window and 64 retained
+delivery permits. That is a 24.2% gain, closing 22.9% of the observed absolute gap
+to Jai. Sampled memory is similar (26.59 MiB), but delivery p99 increases from 5.66
+to 12.82 ms. The default remains final-drain acknowledgement. The report distinguishes
+this policy-only result from Jai's larger queues and preserves every sample.
+
+The [shared worker-dispatch experiment](docs/worker-dispatch.md) showed no reliable
+gain and remains retired. The application uses unpatched upstream goose-http.
+Rendering parity, bounded admission and both acknowledgement-policy tests pass.
+These are workload-specific application results, not a general language-speed claim.
 
 The [send-copy measurements](docs/send-copy.md) and
 [upstream review](docs/send-copy-pr.md) remain as historical evidence for the retired
