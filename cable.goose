@@ -40,7 +40,7 @@ fn publish(room: i64, reply: http::MailAddress, body: const u8[:]) {
     cable_command(CABLE_PUBLISH, reply);
 }
 
-thread_fn cable_broker(queued_ack: bool) {
+thread_fn cable_broker(queued_ack: bool, window_size: i64) {
     var connections: CableConnection[>..] = [];
     // Each connection owns 16 contiguous slots; connection scans do not copy their payloads.
     var subscriptions: CableSubscriber[>..] = [];
@@ -48,7 +48,8 @@ thread_fn cable_broker(queued_ack: bool) {
     var targets: i32[>..] = [];
     reusable[] var storage: u8[>..] = [];
     reusable[] var publications: u8[>..] = [];
-    var window: CableDelivery[8] = [CableDelivery { .. }; 8];
+    var window: CableDelivery[>..] = [];
+    for _ in window_size { window.push(CableDelivery { .. }); }
     var head: i64 = 0;
     var tail: i64 = 0;
     var acknowledged: i64 = 0;
@@ -58,7 +59,7 @@ thread_fn cable_broker(queued_ack: bool) {
 
     fn drop_connection(index: i64) {
         connections[index].live = false;
-        for &target, slot in targets[index*CABLE_WINDOW..(index+1)*CABLE_WINDOW] {
+        for &target, slot in targets[index*window_size..(index+1)*window_size] {
             if target & CABLE_ENROLLED != 0 { window[slot].remaining--; }
             target = 0;
         }
@@ -82,7 +83,7 @@ thread_fn cable_broker(queued_ack: bool) {
                     index = connections.len;
                     connections.push(CableConnection { address: command.address, user: command.user, .. });
                     for _ in 0..16 { subscriptions.push(CableSubscriber { .. }); }
-                    for _ in 0..CABLE_WINDOW { targets.push(0); }
+                    for _ in 0..window_size { targets.push(0); }
                 }
                 connections[index] = CableConnection { live: true, address: command.address, user: command.user, sequence: tail, .. };
             }
@@ -106,13 +107,13 @@ thread_fn cable_broker(queued_ack: bool) {
         } else if index >= 0 && command.kind == CABLE_UNSUBSCRIBE {
             for &sub, si in subscriptions[index*16..index*16+16] {
                 if sub.live && sub.identifier == command.data {
-                    let current = connections[index].sequence % CABLE_WINDOW;
-                    let mask = targets[index*CABLE_WINDOW+current];
+                    let current = connections[index].sequence & (window_size-1);
+                    let mask = targets[index*window_size+current];
                     let partial = connections[index].offset != 0 && (mask & (1 << si)) != 0 && (mask & ((1 << si)-1)) == 0;
                     sub.live = false; sub.retiring = partial;
                     // An already-started WebSocket message must finish before its identifier can be reused.
                     if !partial { storage.free_slice(sub.identifier); }
-                    for &target, slot in targets[index*CABLE_WINDOW..(index+1)*CABLE_WINDOW] {
+                    for &target, slot in targets[index*window_size..(index+1)*window_size] {
                         if !partial || slot != current { target &= ~(1 << si); }
                     }
                 }
@@ -129,10 +130,10 @@ thread_fn cable_broker(queued_ack: bool) {
             apply_command(command);
         }
         loop {
-            while tail - head < CABLE_WINDOW {
+            while tail - head < window_size {
                 let pending, exists = qpoll<Publication>();
                 if !exists { break; }
-                let slot = tail % CABLE_WINDOW;
+                let slot = tail & (window_size-1);
                 window[slot].reply = pending.reply;
                 window[slot].remaining = 0;
                 body.clear();
@@ -144,7 +145,7 @@ thread_fn cable_broker(queued_ack: bool) {
                         }
                     }
                     if mask != 0 { mask |= CABLE_ENROLLED; window[slot].remaining++; }
-                    targets[ci*CABLE_WINDOW+slot] = mask;
+                    targets[ci*window_size+slot] = mask;
                 }
                 if window[slot].remaining != 0 { json::format_string(body, pending.body); }
                 let encoded = publications.alloc_slice(body.len); copy_into(encoded, body);
@@ -154,7 +155,7 @@ thread_fn cable_broker(queued_ack: bool) {
             if queued_ack {
                 // Enrollment and payload retention precede success; drain credits still own retirement.
                 while acknowledged < tail {
-                    let slot = acknowledged % CABLE_WINDOW;
+                    let slot = acknowledged & (window_size-1);
                     if http::mail_send(window[slot].reply, CABLE_ACK, "") == http::FULL { break; }
                     acknowledged++;
                 }
@@ -167,11 +168,11 @@ thread_fn cable_broker(queued_ack: bool) {
                     continue;
                 }
                 while c.sequence < tail {
-                    let slot = c.sequence % CABLE_WINDOW;
-                    let mask = targets[ci*CABLE_WINDOW+slot];
+                    let slot = c.sequence & (window_size-1);
+                    let mask = targets[ci*window_size+slot];
                     if mask & 65535 == 0 {
                         // A final send keeps its completion credit until the next drain event.
-                        if mask & CABLE_ENROLLED != 0 { window[slot].remaining--; targets[ci*CABLE_WINDOW+slot] = 0; }
+                        if mask & CABLE_ENROLLED != 0 { window[slot].remaining--; targets[ci*window_size+slot] = 0; }
                         c.sequence++; c.offset = 0;
                         continue;
                     }
@@ -195,7 +196,7 @@ thread_fn cable_broker(queued_ack: bool) {
                     if sent == http::SENT {
                         c.ready = false; c.offset = end;
                         if end == length {
-                            targets[ci*CABLE_WINDOW+slot] &= ~(1 << subscription); c.offset = 0;
+                            targets[ci*window_size+slot] &= ~(1 << subscription); c.offset = 0;
                             if sub.retiring { storage.free_slice(sub.identifier); subscriptions[ci*16+subscription].retiring = false; }
                         }
                     }
@@ -205,7 +206,7 @@ thread_fn cable_broker(queued_ack: bool) {
             let previous = head;
             // Retire in publication order, including writes whose HTTP client disconnected.
             while head < tail {
-                let slot = head % CABLE_WINDOW;
+                let slot = head & (window_size-1);
                 if window[slot].remaining != 0 { break; }
                 if queued_ack {
                     if head == acknowledged { break; }

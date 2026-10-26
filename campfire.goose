@@ -407,7 +407,18 @@ fn main() {
             else {abort("CAMPFIRE_PUBLICATION_ACK must be drained or queued");}
     }
     let queued_ack = publication_ack=="queued";
+    var publication_window: i64 = campfire::CABLE_WINDOW;
+    var window_text: u8[>..]=[];
+    if env("CAMPFIRE_PUBLICATION_WINDOW",window_text) {
+        let size, ok = parse_int(window_text);
+        guard ok && size>=8 && size<=512 && (size & (size-1))==0
+            else {abort("CAMPFIRE_PUBLICATION_WINDOW must be a power of two from 8 through 512");}
+        guard queued_ack || size==8 else {abort("larger publication windows require queued acknowledgements");}
+        publication_window=size;
+    }
+    let delivery_permits=publication_window+56;
     write_stderr(str("Publication acknowledgement: ",if queued_ack {"queued"} else {"drained"},"\n"));
+    write_stderr(str("Publication window: ",publication_window,"; delivery permits: ",delivery_permits,"\n"));
     var cfg = http::Config { address: "0.0.0.0", port: 3000, workers: 4, max_conns: 1024,
         mail_slots:128,mail_size:8192,max_waiting:1024,.. };
     cfg.emulate_ring=backend=="emulated";
@@ -426,9 +437,9 @@ fn main() {
         cfg.workers = workers;
     }
     campfire::initialize_database(settings.database);
-    qlimit<campfire::Publication>(64); qlimit<campfire::CablePermit>(64); qlimit<campfire::CableCommand>(65536);
-    for i in 64 { qput(campfire::CablePermit { .. }); }
-    thread_spawn(campfire::cable_broker,queued_ack);
+    qlimit<campfire::Publication>(delivery_permits); qlimit<campfire::CablePermit>(delivery_permits); qlimit<campfire::CableCommand>(65536);
+    for i in delivery_permits { qput(campfire::CablePermit { .. }); }
+    thread_spawn(campfire::cable_broker,queued_ack,publication_window);
     qlimit<campfire::CheckpointJob>(1);
     let checkpointer=thread_spawn(campfire::checkpointer,copy(settings.database));
     http::run(cfg, worker);

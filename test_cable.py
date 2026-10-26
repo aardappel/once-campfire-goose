@@ -108,6 +108,8 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
         port = available.getsockname()[1]
     environment = dict(os.environ, DATABASE_PATH=str(database), HTTP_PORT=str(port), SECRET_KEY_BASE=secrets.token_hex(64))
     queued_ack = environment.get("CAMPFIRE_PUBLICATION_ACK", "drained") == "queued"
+    window_size = int(environment.get("CAMPFIRE_PUBLICATION_WINDOW", "8"))
+    delivery_permits = window_size + 56
     if "--batch-pressure" in sys.argv[2:]:
         environment["CAMPFIRE_HTTP_THREADS"] = "1"
     with (work / "server.log").open("w+") as log:
@@ -242,7 +244,7 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
             with concurrent.futures.ThreadPoolExecutor(max_workers=64) as pool:
                 try:
                     # Fill the slow reader's TCP window before checking application back-pressure.
-                    for i in range(1024 if batch_pressure else 64):
+                    for i in range(window_size + (1024 if batch_pressure else 64)):
                         marker = f"pressure-item-{i}"
                         post = pool.submit(request, "/rooms/1/messages",
                                            {"message[body]": marker + ("x" * 512 if batch_pressure else "&" * 40000), "message[client_message_id]": marker}, cookie)
@@ -260,8 +262,8 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
                                       urlencode({"message[body]": marker, "message[client_message_id]": marker}),
                                       {"Cookie": cookie, "Content-Type": "application/x-www-form-urlencoded"})
                     accepted.append((marker, None))
-                    # Queued success retains eight occupied delivery permits behind the stalled reader.
-                    for _ in range(54 if queued_ack else 62):
+                    # Queued success retains the entire active window's delivery permits.
+                    for _ in range(delivery_permits - (window_size if queued_ack else 0) - 2):
                         marker = f"pressure-item-{len(accepted)}"
                         accepted.append((marker, pool.submit(request, "/rooms/1/messages",
                                                              {"message[body]": marker + ("x" * (128 * (len(accepted) % 4)) if batch_pressure else "&" * (5000 * (len(accepted) % 4))), "message[client_message_id]": marker}, cookie)))
@@ -271,14 +273,14 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
                     assert message_count() == start_count + len(accepted), "admitted writes did not commit"
                     abandoned.close()
                     assert not blocked.done(), "acknowledged without space in the delivery window"
-                    # Eight publications can progress independently; a stalled reader holds retirement.
+                    # Active publications progress independently; a stalled reader holds retirement.
                     deadline = time.monotonic() + 3
-                    expected_active = i if queued_ack else i + 8
+                    expected_active = i if queued_ack else i + window_size
                     while min(len(received), len(peer_received)) < expected_active and time.monotonic() < deadline:
                         time.sleep(.01)
                     assert len(received) == len(peer_received) == expected_active, "bounded pipeline did not advance fast readers"
                     if queued_ack:
-                        assert i >= 8 and all(result.done() and result.result()[0] == 200 for _, result in accepted[i-8:i]), "queued acknowledgements waited for final drain"
+                        assert i >= window_size and all(result.done() and result.result()[0] == 200 for _, result in accepted[i-window_size:i]), "queued acknowledgements waited for final drain"
                     active = received.copy()
                     assert peer_received == active, "readers disagree on publication order"
                     late = WebSocket(port, cookie)
@@ -288,6 +290,7 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
                     readers.append(late_reader)
                     late_reader.start()
                     retained = rss()
+                    print("PRESSURE_MEMORY " + json.dumps({"window": window_size, "permits": delivery_permits, "queued": queued_ack, "batch": batch_pressure, "stalled_rss_bytes": retained}), flush=True)
                     for _ in range(100):
                         status, _, body = request("/rooms/1/messages", {"message[body]": "pressure-rejected",
                                                                       "message[client_message_id]": "pressure-rejected"}, cookie)
@@ -313,7 +316,7 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
                     slow.close()
                     fast.close()
                     peer.close()
-            print(f"PASS: signed subscriptions, fragmented and multi-subscription delivery, unsubscribe/reuse, ordered eight-publication pipelining, late enrollment, 64 retained delivery permits, bounded rejected-write memory, {'queued' if queued_ack else 'drained'} acknowledgements, disconnect recovery and presence cleanup")
+            print(f"PASS: signed subscriptions, fragmented and multi-subscription delivery, unsubscribe/reuse, ordered {window_size}-publication pipelining, late enrollment, {delivery_permits} retained delivery permits, bounded rejected-write memory, {'queued' if queued_ack else 'drained'} acknowledgements, disconnect recovery and presence cleanup")
         except BaseException:
             log.seek(0)
             print(log.read(), file=sys.stderr)

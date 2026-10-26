@@ -96,6 +96,9 @@ def metrics(container):
             if field in values:
                 result["anonymous_bytes"] = int(values[field])
                 break
+    peak = command("docker", "exec", container, "cat", "/sys/fs/cgroup/memory.peak", check=False)
+    if peak.returncode == 0:
+        result["container_lifetime_peak_bytes"] = int(peak.stdout.strip())
     return result
 
 
@@ -108,7 +111,9 @@ def main():
     parser.add_argument("--apps", default="goose,rust,jai")
     parser.add_argument("--goose-image", default="once-campfire-goose:app")
     parser.add_argument("--goose-backend", choices=("auto", "epoll", "uring", "emulated"), help="override the Goose image's event loop")
-    parser.add_argument("--goose-publication-ack", choices=("drained", "queued"), default="drained", help="Goose publication acknowledgement experiment; delivery bounds stay unchanged")
+    parser.add_argument("--goose-publication-ack", choices=("drained", "queued"), default="drained", help="select the HTTP acknowledgement stage for Goose publications")
+    parser.add_argument("--goose-publication-window", type=int, choices=(8, 16, 32, 64, 128, 256, 512), default=8)
+    parser.add_argument("--goose-queued-windows", help="comma-separated queued windows to compare in rotated order using the same image")
     parser.add_argument("--goose-seccomp", type=Path, help="optional container policy for Goose, recorded by SHA-256")
     parser.add_argument("--rust-image", default="ghcr.io/basecamp/once-campfire-rust:main")
     parser.add_argument("--jai-image", default="ghcr.io/lucasmeijer/once-campfire-jai:2ecd487")
@@ -128,6 +133,11 @@ def main():
     apps, profiles, selected = args.apps.split(","), args.profiles.split(","), args.routes.split(",")
     assert apps and len(set(apps)) == len(apps) and set(apps) <= {"goose", "rust", "jai"}
     assert profiles and set(profiles) <= {"baseline", "mixed"}
+    windows = [int(value) for value in args.goose_queued_windows.split(",")] if args.goose_queued_windows else [args.goose_publication_window]
+    assert windows and len(windows) == len(set(windows)) and set(windows) <= {8, 16, 32, 64, 128, 256, 512}
+    assert args.goose_publication_ack == "queued" or windows == [8]
+    assert not args.goose_queued_windows or ("goose" in apps and args.goose_publication_ack == "queued")
+    cases = [(app, window) for app in apps for window in (windows if app == "goose" else [None])]
     assert args.duration > 0 and args.clients > 0 and (args.preflight_only or args.rounds >= 2)
     assert args.fanout_clients >= 0
     assert args.write_clients is None or args.write_clients > 0
@@ -181,6 +191,7 @@ def main():
         "profile_writes": args.profile_writes, "profiles": profiles, "read_routes": selected, "mixed_write_rate": 10, "gzip": True, "preflight_only": args.preflight_only,
         "goose_backend": args.goose_backend or "image default",
         "goose_publication_ack": args.goose_publication_ack,
+        "goose_publication_windows": windows,
         "goose_seccomp": {"path": str(args.goose_seccomp.resolve()), "sha256": checksum(args.goose_seccomp)} if args.goose_seccomp else "Docker default",
         "validator_sha256": checksum(verification / "loadgen/src/validation.rs"),
         "contracts_sha256": checksum(verification / "bench/contracts.rb"),
@@ -193,9 +204,11 @@ def main():
     sequence = 0
     for profile in (["baseline"] if args.preflight_only else profiles):
         for iteration in range(1 if args.preflight_only else args.rounds):
-            # Rotating order gives each application each position in three rounds.
-            order = apps[iteration % len(apps):] + apps[:iteration % len(apps)]
-            for app in order:
+            # Spread queue variants and references across early and late positions.
+            offset = (iteration * (2 if args.goose_queued_windows else 1)) % len(cases)
+            order = cases[offset:] + cases[:offset]
+            for app, publication_window in order:
+                variant = f"goose-q{publication_window}" if app == "goose" and args.goose_queued_windows else app
                 name = f"goose-campfire-{uuid.uuid4().hex[:10]}-{app}"
                 with tempfile.TemporaryDirectory(prefix=f"{app}-{profile}-", dir=runtime) as temporary:
                     data = Path(temporary)
@@ -225,6 +238,7 @@ def main():
                         config["CAMPFIRE_HTTP_BACKEND"]=args.goose_backend
                     if app=="goose":
                         config["CAMPFIRE_PUBLICATION_ACK"]=args.goose_publication_ack
+                        config["CAMPFIRE_PUBLICATION_WINDOW"]=str(publication_window)
                     env_file = data / "server.env"
                     env_file.write_text("".join(f"{key}={value}\n" for key, value in config.items()))
                     os.chmod(env_file, 0o600)
@@ -236,8 +250,9 @@ def main():
                     for folder, mount in (("db", "db"), ("files", "files"), ("logs", "logs")):
                         launch += ["-v", f"{data / folder}:/rails/storage/{mount}"]
                     launch += [images[app]["id"]]
-                    row = {"app": app, "round": iteration + 1, "profile": profile, "samples": []}
-                    label = f"{app}-{profile}-{iteration + 1}"
+                    row = {"app": app, "variant": variant, "publication_window": publication_window,
+                           "round": iteration + 1, "profile": profile, "samples": []}
+                    label = f"{variant}-{profile}-{iteration + 1}"
                     audits, acknowledged = [], 0
                     try:
                         command(*launch)
@@ -261,6 +276,9 @@ def main():
                         if app == "goose":
                             log = command("docker", "logs", name)
                             row["backend_log"] = log.stdout + log.stderr
+                            if args.goose_queued_windows or args.goose_publication_window != 8:
+                                assert f"Publication acknowledgement: queued\n" in row["backend_log"]
+                                assert f"Publication window: {publication_window}; delivery permits: {publication_window+56}\n" in row["backend_log"]
                             descriptors = command("docker", "exec", name, "sh", "-c",
                                                   'for fd in /proc/1/fd/*; do readlink "$fd" || true; done').stdout
                             row["native_ring_count"] = descriptors.splitlines().count("anon_inode:[io_uring]")
@@ -333,6 +351,7 @@ def main():
                                 if "cpu_seconds" in before and "cpu_seconds" in after:
                                     value["server_cpu_cores"] = (after["cpu_seconds"] - before["cpu_seconds"]) / (time.monotonic() - started)
                                 value["server_anonymous_bytes_after"] = after.get("anonymous_bytes")
+                                value["server_container_lifetime_peak_bytes_after"] = after.get("container_lifetime_peak_bytes")
                                 row["samples"].append(value)
                                 print(f"{label} {route}: {value['rps']} valid requests/s", flush=True)
                             if args.fanout_clients:
@@ -399,12 +418,12 @@ def main():
     summary = {}
     for profile in profiles:
         summary[profile] = {}
-        for app in apps:
-            entries = [sample for row in results if row["app"] == app and row["profile"] == profile for sample in row["samples"]]
-            summary[profile][app] = {}
+        for variant in dict.fromkeys(row["variant"] for row in results):
+            entries = [sample for row in results if row["variant"] == variant and row["profile"] == profile for sample in row["samples"]]
+            summary[profile][variant] = {}
             for route in sorted({item["route"] for item in entries}):
                 values = [item for item in entries if item["route"] == route]
-                summary[profile][app][route] = {"median_rps": statistics.median(item["rps"] for item in values),
+                summary[profile][variant][route] = {"median_rps": statistics.median(item["rps"] for item in values),
                                                "runs": [item["rps"] for item in values]}
     save(output / "metadata.json", metadata)
     save(output / "summary.json", {"metadata": metadata, "summary": summary})

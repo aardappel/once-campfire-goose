@@ -23,6 +23,11 @@ if [ "${1:-}" != "--build-only" ]; then
         CAMPFIRE_HTTP_BACKEND="$backend" python3 test_server.py build/campfire
         CAMPFIRE_HTTP_BACKEND="$backend" python3 test_server.py build/campfire --no-cache
     done
+    for window in 32 128 512; do
+        CAMPFIRE_PUBLICATION_ACK=queued CAMPFIRE_PUBLICATION_WINDOW="$window" CAMPFIRE_HTTP_BACKEND=epoll python3 test_cable.py build/campfire
+        CAMPFIRE_PUBLICATION_ACK=queued CAMPFIRE_PUBLICATION_WINDOW="$window" CAMPFIRE_HTTP_BACKEND=epoll python3 test_cable.py build/campfire --batch-pressure
+    done
+    CAMPFIRE_PUBLICATION_ACK=queued CAMPFIRE_PUBLICATION_WINDOW=512 CAMPFIRE_HTTP_BACKEND=emulated python3 test_cable.py build/campfire --batch-pressure
     for test in cache auth render; do
         "$compiler" build --offline --cc clang -o "build/${test}_test" "${test}_test.goose"
         "build/${test}_test"
