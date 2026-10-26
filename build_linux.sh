@@ -21,7 +21,7 @@ if [ "${1:-}" != "--build-only" ]; then
         CAMPFIRE_HTTP_BACKEND="$backend" python3 test_server.py build/campfire
         CAMPFIRE_HTTP_BACKEND="$backend" python3 test_server.py build/campfire --no-cache
     done
-    for test in cache auth render worker_mail; do
+    for test in cache auth render; do
         "$compiler" build --offline --cc clang -o "build/${test}_test" "${test}_test.goose"
         "build/${test}_test"
     done

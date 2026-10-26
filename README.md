@@ -50,8 +50,8 @@ TLS should terminate at a reverse proxy; application deployment compatibility is
 The build pins upstream goose-http including the merged
 [drain notification PR #2](https://github.com/kaitk/goose-http/pull/2).
 The application uses these credits to bound WebSocket output when readers stall.
-The experimental build carries a pinned worker-dispatch extension, which lets an HTTP
-worker deliver one shared mailbox chunk to multiple readers. The send-copy experiment in
+The dependency is unpatched. The shared-worker dispatch experiment was retired after
+the matched comparison found no reliable fan-out improvement. The send-copy experiment in
 [PR #3](https://github.com/kaitk/goose-http/pull/3) was retired after review found a
 13-28% server-bound throughput loss. The current pin includes upstream's native-ring
 allocation fix, lazy WebSocket reservations, precise timers, and goose-compress v0.1.4.
@@ -62,21 +62,26 @@ See the [dependency history](patches/README.md) and [reproducer](docs/websocket-
 
 `test_server.py`, native unit tests, and the differential rendering tests are preserved from
 the experiment. Historical results and limitations are in [docs/experiment.md](docs/experiment.md).
-The [current publication-pipeline comparison](docs/publication-pipeline.md) uses packaged images, current
+The [current worker-dispatch comparison](docs/worker-dispatch.md) uses packaged images, current
 Rust/Jai references, the unchanged shared load generator and validators, and audited writes.
 It records throughput, memory, exact versions, host activity, and workload limits.
 See [cache validation](docs/read-cache.md) for the read path and the historical
 [backend comparison](docs/backend-selection.md) for epoll versus ring modes.
 
-On 2026-10-25, Goose with epoll reaches medians of 382.4k room reads/s and
-6.0k posts/s without subscribers, versus Jai's 314.8k and 4.2k.
-Bounded publication pipelining delivers 1,587 messages/s to all 64 readers,
-a 41% increase over the serial broker's 1,125. Jai reaches
-3,324 and Rust 2,236; the fan-out gap remains.
-Anonymous memory after fan-out is 26.68 MiB, versus 26.75 before.
-Rendering parity, bounded admission and drain acknowledgement tests pass. The report
-preserves individual samples, host activity and compatibility limits; these are
-workload-specific application results, not a general language-speed claim.
+On 2026-10-25 PDT, the retained Goose pipeline with epoll reaches medians of
+399.5k room reads/s and 6.17k posts/s without subscribers, versus Jai's 322.6k and
+4.35k. Complete delivery to all 64 readers reaches 1,767 messages/s, versus Rust's
+2,343 and Jai's 3,440. Anonymous memory after fan-out is 28.04 MiB, versus 91.52
+for Rust and 82.71 for Jai.
+
+Shared worker dispatch reached a median of 1,756 messages/s and showed no reliable
+fan-out gain. That extension is retired; its code, tests, profiles and measurements
+remain in Git and the report. The default uses the existing bounded publication
+pipeline and unpatched upstream goose-http. Rendering parity, bounded admission
+and final-drain acknowledgement tests pass. Jai normally acknowledges queued
+frames, allowing different delivery overlap; the report documents that distinction
+without claiming to quantify its effect. These are workload-specific application
+results, not a general language-speed claim.
 
 The [send-copy measurements](docs/send-copy.md) and
 [upstream review](docs/send-copy-pr.md) remain as historical evidence for the retired
