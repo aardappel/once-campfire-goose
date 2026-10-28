@@ -38,6 +38,8 @@ Storage must be writable by UID 1000. An empty database is initialized from the 
 visit `/first_run` to create the account and administrator. Existing Campfire databases are preserved.
 `HTTP_PORT` defaults to 3000 in the image, `CAMPFIRE_HTTP_THREADS` to 4, and `CAMPFIRE_CACHE=0`
 disables response caching. `DATABASE_PATH` and `STORAGE_PATH` override storage locations.
+`CAMPFIRE_HTTP_MAX_CONNS` (64–65536, default 1024) sets each worker's connection limit and
+waiting cable exchanges; raise it for rooms with more than about 4,000 open WebSockets.
 `CAMPFIRE_HTTP_BACKEND` defaults to `epoll`, the direct Linux loop usable in ordinary Docker.
 `auto` probes for native io_uring and selects epoll when unavailable. `uring` requires native
 io_uring and refuses emulation; `emulated` explicitly selects the ring emulation for comparisons.
@@ -55,7 +57,13 @@ the matched comparison found no reliable fan-out improvement. The send-copy expe
 [PR #3](https://github.com/kaitk/goose-http/pull/3) was retired after review found a
 13-28% server-bound throughput loss. The current pin includes upstream's native-ring
 allocation fix, lazy WebSocket reservations, precise timers, and goose-compress v0.1.4.
-The immutable HTTP pin is v0.5.11; HTTP/3 is disabled in this application.
+HTTP/3 is disabled in this application.
+
+The pin is goose-http's experiment branch `campfire-fanout` at `e4029c3f`, tagged
+`v0.5.11-campfire.1`: v0.5.11 plus refcounted shared blobs that workers send zero-copy
+(`sendmsg` on epoll and both rings; TLS and Windows copy), generation-checked blob handles,
+and a fix that keeps an upgraded exchange's mailbox key live through TIMEOUT. These are
+planned for a goose-http release; until then the tag keeps the pin reproducible.
 See the [dependency history](patches/README.md) and [reproducer](docs/websocket-backpressure.md).
 
 ## Verification and provenance
@@ -67,6 +75,14 @@ the unchanged shared load generator and validators, audited writes, and 15 guard
 against current Jai. It records throughput, latency, memory, exact versions and every sample.
 See [cache validation](docs/read-cache.md) for the read path and the historical
 [backend comparison](docs/backend-selection.md) for epoll versus ring modes.
+
+**Fan-out delivery (2026-10-28):** coalesced frames, shared bodies, zero-copy sends, a
+work-list broker and per-worker delivery roughly double complete fan-out at 64 readers and
+almost triple it at 2,000, with reads and posts unchanged and much lower delivery latency.
+With this broker, queued-8 matches larger windows on throughput at the lowest latency. The
+[fan-out delivery report](docs/fanout-delivery.md) has the changes, the preliminary local
+numbers, and the experiments that were tried and dropped. Authoritative results against Jai
+are pending. The comparison below predates these changes.
 
 On 2026-10-26 PDT, queued windows of 8, 32, 128 and 512 reach median complete fan-out
 rates of 2,031, 2,266, 2,434 and 2,322 messages/s to all 64 readers. Jai reaches 3,448.
