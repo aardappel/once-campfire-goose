@@ -59,10 +59,12 @@ the matched comparison found no reliable fan-out improvement. The send-copy expe
 allocation fix, lazy WebSocket reservations, precise timers, and goose-compress v0.1.4.
 HTTP/3 is disabled in this application.
 
-The pin is goose-http's experiment branch `campfire-fanout` at `e4029c3f`, tagged
-`v0.5.11-campfire.1`: v0.5.11 plus refcounted shared blobs that workers send zero-copy
+The pin is goose-http's experiment branch `campfire-fanout` at `c3179b05`, tagged
+`v0.5.11-campfire.2`: v0.5.11 plus refcounted shared blobs that workers send zero-copy
 (`sendmsg` on epoll and both rings; TLS and Windows copy), generation-checked blob handles,
-and a fix that keeps an upgraded exchange's mailbox key live through TIMEOUT. These are
+a fix that keeps an upgraded exchange's mailbox key live through TIMEOUT, a worker address
+with local wakes, and an epoll loop that skips the recv after a wake when the socket is
+known to be empty. These are
 planned for a goose-http release; until then the tag keeps the pin reproducible.
 See the [dependency history](patches/README.md) and [reproducer](docs/websocket-backpressure.md).
 

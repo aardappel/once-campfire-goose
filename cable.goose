@@ -12,7 +12,7 @@ import sessions;
 
 struct CablePermit { value: bool = true }
 struct Publication { room: i64, reply: http::MailAddress, body: u8[] }
-// A report to the broker: its kind, an address in the reporting worker's box, and a publication sequence.
+// A report to the broker: its kind, the reporting worker's address, and a publication sequence.
 struct CableCommand { kind: i32, address: http::MailAddress, value: i64 = 0 }
 let CABLE_WINDOW: i64 = 8;
 // Every enrolled connection of the worker drained or left the publications before value.
@@ -20,12 +20,12 @@ let CABLE_CREDIT: i32 = 2;
 // The worker has no cable connection left: the publications before value are credited, and later ones skip it.
 let CABLE_EMPTY: i32 = 3;
 let CABLE_PUBLISH: i32 = 5;
-// The worker's publications go to this address from now on, beginning with sequence value.
+// The worker has cable connections again: its publications go to this address from sequence value.
 let CABLE_REP: i32 = 6;
 let CABLE_ACK: i32 = 256;
-// Mail to a worker's representative connection: records of publications for the worker to deliver.
+// Mail to a worker's address: records of publications for the worker to deliver.
 let CABLE_PUBS: i32 = 257;
-// Mail a worker sends one of its own connections, so that its loop calls it to write.
+// A wake a worker gives one of its own connections, so that its loop calls it to write.
 let CABLE_KICK: i32 = 258;
 let CABLE_ENROLLED: i32 = 65536;
 // The most frame bytes one batch writes before waiting for its drain.
@@ -53,13 +53,11 @@ fn cable_put(out: u8[>..]&, value: i64) {
     for i in 8 { out.push((value >> (8*i)) as! u8); }
 }
 
-// The broker's view of one worker: the connection whose address takes its publications, and how far
-// they were sent and credited. A live worker is enrolled in every publication from credited to the tail.
+// The broker's view of one worker: its address, and how far its publications were sent and credited.
+// A live worker is enrolled in every publication from credited to the tail.
 struct CableLink {
     rep: http::MailAddress = http::MailAddress { .. },
     live: bool = false,
-    // The representative's address went stale; the worker names another, or reports that it has none.
-    stale: bool = false,
     sent: i64 = 0,
     credited: i64 = 0,
 }
@@ -92,11 +90,9 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
         if command.kind == CABLE_REP {
             if index < 0 { index = links.len; links.push(CableLink { .. }); }
             let link .= links[index];
-            // A worker that had no connection enrolls in later publications only; one that changed
-            // representative is sent again what it has not received.
+            // A worker that had no connection enrolls in later publications only.
             if !link.live { link.live = true; link.credited = tail; link.sent = tail; }
-            else { link.sent = max(command.value, link.credited); }
-            link.rep = command.address; link.stale = false;
+            link.rep = command.address;
         } else if index >= 0 && links[index].live {
             let link .= links[index];
             if command.kind == CABLE_CREDIT { credit(link, min(command.value, link.sent)); }
@@ -146,7 +142,7 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
             }
             // One mail per worker carries up to four publications; the worker enrolls and writes to its readers.
             for &link in links {
-                while link.live && !link.stale && link.sent < tail {
+                while link.live && link.sent < tail {
                     mail.clear();
                     var n: i64 = 0;
                     while (n+1) * CABLE_RECORD <= CABLE_MAIL && link.sent + n < tail {
@@ -158,7 +154,8 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
                     let sent = http::mail_send(link.rep, CABLE_PUBS, mail);
                     if sent == http::SENT { link.sent += n; }
                     else if sent == http::FULL { blocked = true; break; }
-                    else { link.stale = true; }
+                    // The worker's loop ended.
+                    else { credit(link, tail); link.live = false; }
                 }
             }
             let previous = head;
@@ -191,7 +188,7 @@ struct CableLocal {
     live: bool = false, gen: i64 = 0, address: http::MailAddress = http::MailAddress { .. }, user: i64 = 0,
     // Not waiting for a written batch to drain.
     ready: bool = true,
-    // Listed for a kick, or sent one that has not arrived.
+    // Listed for a kick, or given one that has not arrived.
     kicked: bool = false,
     // The next publication to write, and the bytes of its current message already written.
     sequence: i64 = 0, offset: i64 = 0,
@@ -210,9 +207,9 @@ struct CableShard {
     window: i64 = 8,
     // The next sequence expected, the first not done by every enrolled connection, and the last credit reported.
     next: i64 = 0, done: i64 = 0, reported: i64 = 0,
-    // The connection whose address takes the worker's publications, or -1, and the live connections.
-    rep: i64 = -1, count: i64 = 0, gens: i64 = 0, probe: i64 = 0,
-    // An address in the worker's box, which names the worker to the broker.
+    // The live connections.
+    count: i64 = 0, gens: i64 = 0, probe: i64 = 0,
+    // The worker's address, which takes its publications.
     box: http::MailAddress = http::MailAddress { .. },
     entries: CableEntry[512] = [CableEntry { .. }; 512],
     // Connections to kick, as pairs of index and generation: the first listed of kicks. It never shrinks.
@@ -231,14 +228,15 @@ fn cable_matches(sub: const CableSubscriber&, user: i64, room: i64) -> bool {
 // Credits the broker with the publications every enrolled connection drained or left.
 fn cable_credit(shard: CableShard&) {
     while shard.done < shard.next && shard.entries[shard.done & (shard.window-1)].remaining == 0 { shard.done++; }
-    if shard.rep >= 0 && shard.done > shard.reported {
+    if shard.count > 0 && shard.done > shard.reported {
         shard.reported = shard.done;
         cable_tell(CABLE_CREDIT, shard.box, shard.done);
     }
 }
 
 // Adds an upgraded connection, which takes the publications its worker receives from now on.
-fn cable_open(shard: CableShard&, conns: CableLocal[>..]&, targets: i32[>..]&, address: http::MailAddress, user: i64) -> i64 {
+fn cable_open(shard: CableShard&, conns: CableLocal[>..]&, targets: i32[>..]&, address: http::MailAddress, worker: http::MailAddress,
+               user: i64) -> i64 {
     var index: i64 = -1;
     for &c, i in conns { if !c.live { index = i; break; } }
     if index < 0 {
@@ -251,7 +249,7 @@ fn cable_open(shard: CableShard&, conns: CableLocal[>..]&, targets: i32[>..]&, a
     c.live = true; c.gen = shard.gens; c.address = address; c.user = user; c.ready = true; c.kicked = false;
     c.sequence = shard.next; c.offset = 0; c.credited = shard.next; c.mask = 0;
     shard.count++;
-    if shard.rep < 0 { shard.rep = index; shard.box = address; cable_tell(CABLE_REP, address, shard.next); }
+    if shard.count == 1 { shard.box = worker; cable_tell(CABLE_REP, worker, shard.next); }
     return index;
 }
 
@@ -272,24 +270,17 @@ fn cable_leave(shard: CableShard&, conns: CableLocal[>..]&, targets: i32[>..]&, 
         }
     }
     shard.count--;
-    if shard.rep == index {
-        shard.rep = -1;
-        for &other, i in conns { if other.live { shard.rep = i; break; } }
-        if shard.rep >= 0 {
-            // Mail to the old address may have been dropped: the broker sends again from next.
-            cable_tell(CABLE_REP, conns[shard.rep].address, shard.next);
-        } else {
-            // With no connection left, every publication the worker holds is done.
-            shard.done = shard.next; shard.reported = shard.next;
-            cable_tell(CABLE_EMPTY, shard.box, shard.next);
-        }
+    if shard.count == 0 {
+        // With no connection left, every publication the worker holds is done.
+        shard.done = shard.next; shard.reported = shard.next;
+        cable_tell(CABLE_EMPTY, shard.box, shard.next);
     }
     cable_credit(shard);
 }
 
 // Enrolls the worker's matching subscriptions in each publication of a broker mail, and lists the ready
-// readers other than current for a kick.
-fn cable_receive(shard: CableShard&, conns: CableLocal[>..]&, targets: i32[>..]&, data: const u8[:], current: i64) {
+// readers for a kick.
+fn cable_receive(shard: CableShard&, conns: CableLocal[>..]&, targets: i32[>..]&, data: const u8[:]) {
     let w = shard.window;
     var at: i64 = 0;
     while at + CABLE_RECORD <= data.len {
@@ -298,8 +289,6 @@ fn cable_receive(shard: CableShard&, conns: CableLocal[>..]&, targets: i32[>..]&
         let body = http::Shared { h: cable_le(data, at+16, 8) };
         let length = cable_le(data, at+24, 8);
         at += CABLE_RECORD;
-        // Sent again after the worker changed representative.
-        if sequence < shard.next { continue; }
         if sequence > shard.next {
             // The broker enrolled the worker afresh, after it had no connection: it skips what it was never sent.
             if shard.done == shard.next { shard.done = sequence; }
@@ -320,7 +309,7 @@ fn cable_receive(shard: CableShard&, conns: CableLocal[>..]&, targets: i32[>..]&
             }
             if mask != 0 {
                 mask |= CABLE_ENROLLED; enrolled++;
-                if ci != current && c.ready && !c.kicked { c.kicked = true; cable_list(shard, ci); cable_list(shard, c.gen); }
+                if c.ready && !c.kicked { c.kicked = true; cable_list(shard, ci); cable_list(shard, c.gen); }
             }
             targets[ci*w+slot] = mask;
         }
@@ -334,17 +323,15 @@ fn cable_list(shard: CableShard&, value: i64) {
     shard.listed++;
 }
 
-// Mails each listed connection a kick, until the worker's box is full.
+// Wakes each listed connection.
 fn cable_pump(shard: CableShard&, conns: CableLocal[>..]&, targets: i32[>..]&, storage: u8[>..]&) {
     var k: i64 = 0;
     while k < shard.listed {
         let index = shard.kicks[k];
         let gen = shard.kicks[k+1];
         if cable_owns(conns, index, gen) && conns[index].kicked {
-            let sent = http::mail_send(conns[index].address, CABLE_KICK, "");
-            if sent == http::FULL { break; }
-            // A live exchange's address always takes mail: this one ended.
-            if sent != http::SENT { cable_leave(shard, conns, targets, storage, index, gen); }
+            // A live exchange always takes a wake: this one ended.
+            if http::wake(conns[index].address, CABLE_KICK) != http::SENT { cable_leave(shard, conns, targets, storage, index, gen); }
         }
         k += 2;
     }

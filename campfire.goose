@@ -5,7 +5,7 @@ import cable;
 import message_actions;
 import browser_routes;
 import os;
-import http from "github.com/kaitk/goose-http@e4029c3fa7fe3c6c073bc05c87be569317deff9c";
+import http from "github.com/kaitk/goose-http@c3179b05ce13936ad2f8c713d1a670eca53e0437";
 import hash from "github.com/kaitk/goose-hash@v0.0.4";
 import compress from "github.com/kaitk/goose-compress@v0.1.4";
 import sqlite from "./build/sqlite";
@@ -297,7 +297,12 @@ thread_fn worker(cfg: http::Config) {
     var cable_targets: i32[>..] = [];
     var cable = campfire::CableShard { window: settings.cable_window, .. };
     let e = serve_app(cfg, Exchange { .. }) { ev, exchange, out =>
-        if ev.kind == http::REQUEST && http::path_of(ev.req.target) == "/cable" {
+        if ev.kind == http::WORKER {
+            // Publications the broker mailed the worker: its readers enroll, and wake to write.
+            campfire::cable_receive(cable,cable_conns,cable_targets,ev.data);
+            campfire::cable_pump(cable,cable_conns,cable_targets,cable_storage);
+            campfire::cable_credit(cable);
+        } else if ev.kind == http::REQUEST && http::path_of(ev.req.target) == "/cable" {
             campfire::clear_cache(state);
             exchange.user = authenticate(db,ev.req,settings.cookie_key,state);
             if exchange.user == 0 || !campfire::same_origin(ev.req) { http::respond(out,403,"text/plain","Forbidden"); }
@@ -305,13 +310,12 @@ thread_fn worker(cfg: http::Config) {
                 exchange.upgraded = true;
                 http::ws_send(out,http::WS_TEXT,"{\"type\":\"welcome\"}");
                 http::after_drain(out);
-                exchange.cable = campfire::cable_open(cable,cable_conns,cable_targets,http::later(out,3000),exchange.user);
+                exchange.cable = campfire::cable_open(cable,cable_conns,cable_targets,http::later(out,3000),http::worker_address(cfg,out),exchange.user);
                 exchange.cable_gen = cable_conns[exchange.cable].gen;
             }
         } else if exchange.upgraded {
             if ev.kind == http::WAKE {
-                // Publications for the worker, mailed to this connection as its representative; or a kick.
-                if ev.tag == campfire::CABLE_PUBS { campfire::cable_receive(cable,cable_conns,cable_targets,ev.data,exchange.cable); }
+                // A kick: the loop writes below.
                 http::later(out,3000);
             } else if ev.kind == http::DRAINED {
                 // Every drain covers the batch written before it.
@@ -478,9 +482,9 @@ fn main() {
         guard ok && conns >= 64 && conns <= 65536 else { abort("invalid CAMPFIRE_HTTP_MAX_CONNS"); }
         cfg.max_conns = conns; cfg.max_waiting = conns;
     }
-    // A box takes a kick for each connection, the publication mails and the acknowledgements outstanding.
+    // A box takes the publication mails and the acknowledgements outstanding; kicks take no slot.
     var slots: i64 = 2;
-    while slots < cfg.max_conns + 4*publication_window + 256 { slots *= 2; }
+    while slots < 4*publication_window + 256 { slots *= 2; }
     cfg.mail_slots = slots as i32;
     campfire::initialize_database(settings.database);
     qlimit<campfire::Publication>(delivery_permits); qlimit<campfire::CablePermit>(delivery_permits); qlimit<campfire::CableCommand>(65536);
