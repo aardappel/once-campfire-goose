@@ -34,6 +34,7 @@ struct Settings {
     cache_enabled: bool = true,
     cache_diagnostics: bool = false,
     epoll: bool = true,
+    cable_window: i64 = 8,
 }
 
 var settings = Settings { .. };
@@ -45,10 +46,10 @@ struct Exchange {
     ws: http::WebSocket = http::WebSocket { .. },
     upgraded: bool = false,
     fragmented: bool = false,
-    // A broker delivery was sent since the last credit; other drains (pings, confirmations) earn none.
-    delivering: bool = false,
-    // The broker's index for this connection, from its last delivery.
-    cable_index: i64 = -1,
+    // The worker's cable connection for this exchange, its generation, and whether it left.
+    cable: i64 = -1,
+    cable_gen: i64 = 0,
+    left: bool = false,
     user: i64 = 0,
     presence: i64[16] = [0;16],
 }
@@ -290,6 +291,11 @@ thread_fn worker(cfg: http::Config) {
     var entries: campfire::CachedPage[128] = [campfire::CachedPage { .. }; 128];
     var bytes: u8[>..] = [];
     var state = campfire::CacheState { enabled: settings.cache_enabled, diagnostics: settings.cache_diagnostics, .. };
+    // The worker's cable connections: it matches and writes the publications the broker mails it.
+    reusable[] var cable_storage: u8[>..] = [];
+    var cable_conns: campfire::CableLocal[>..] = [];
+    var cable_targets: i32[>..] = [];
+    var cable = campfire::CableShard { window: settings.cable_window, .. };
     let e = serve_app(cfg, Exchange { .. }) { ev, exchange, out =>
         if ev.kind == http::REQUEST && http::path_of(ev.req.target) == "/cable" {
             campfire::clear_cache(state);
@@ -298,32 +304,39 @@ thread_fn worker(cfg: http::Config) {
             else if http::ws_upgrade(ev.req,exchange.ws,out,"actioncable-v1-json") {
                 exchange.upgraded = true;
                 http::ws_send(out,http::WS_TEXT,"{\"type\":\"welcome\"}");
-                http::after_drain(out); http::later(out,3000);
+                http::after_drain(out);
+                exchange.cable = campfire::cable_open(cable,cable_conns,cable_targets,http::later(out,3000),exchange.user);
+                exchange.cable_gen = cable_conns[exchange.cable].gen;
             }
         } else if exchange.upgraded {
             if ev.kind == http::WAKE {
-                exchange.fragmented = (ev.tag & 128) == 0; exchange.delivering = true; exchange.cable_index = (ev.tag >> campfire::CABLE_INDEX) as i64;
-                campfire::cable_frame(out,ev.data); http::later(out,3000);
+                // Publications for the worker, mailed to this connection as its representative; or a kick.
+                if ev.tag == campfire::CABLE_PUBS { campfire::cable_receive(cable,cable_conns,cable_targets,ev.data,exchange.cable); }
+                http::later(out,3000);
             } else if ev.kind == http::DRAINED {
+                // Every drain covers the batch written before it.
+                if campfire::cable_owns(cable_conns,exchange.cable,exchange.cable_gen) { cable_conns[exchange.cable].ready = true; }
                 if !exchange.fragmented && exchange.commands.len>0 {
                     let end=exchange.commands.at+exchange.commands.len; var at=exchange.commands.at;
                     while at+4<=end {
                         let size=(http::gathered[at] as i64) | (http::gathered[at+1] as i64)<<8 | (http::gathered[at+2] as i64)<<16 | (http::gathered[at+3] as i64)<<24; at+=4;
                         assert(size>=0 && size<=end-at);
-                        campfire::cable_message(db,exchange.user,settings.stream_key,http::gathered[at..at+size],exchange.presence,out); at+=size;
+                        campfire::cable_message(db,exchange.user,settings.stream_key,http::gathered[at..at+size],exchange.presence,
+                            cable,cable_conns,cable_targets,cable_storage,exchange.cable,exchange.cable_gen,out); at+=size;
                     }
                     http::release_gather(exchange.commands);
                 }
-                let address=http::later(out,3000);
-                if exchange.delivering { exchange.delivering=false; campfire::cable_command(campfire::CABLE_CREDIT,address,exchange.cable_index); }
+                http::later(out,3000);
             } else if ev.kind == http::TIMEOUT {
                 var now: u8[>..] = []; campfire_sql_now(now);
                 if !exchange.fragmented {http::ws_send(out,http::WS_TEXT,str("{\"type\":\"ping\",\"message\":",campfire::campfire_epoch_ms(now)/1000,"}"));}
                 http::after_drain(out); http::later(out,3000);
+                campfire::cable_probe(cable,cable_conns,cable_targets,cable_storage);
             } else {
                 if ev.kind == http::CLOSED {
                     for room in exchange.presence {if room>0 {campfire::presence_change(db,exchange.user,room,2);}}
-                    http::release_gather(exchange.commands); campfire::cable_command(campfire::CABLE_LEAVE,out.stream.later);
+                    http::release_gather(exchange.commands); exchange.left = true;
+                    campfire::cable_leave(cable,cable_conns,cable_targets,cable_storage,exchange.cable,exchange.cable_gen);
                 }
                 http::ws_read(ev,exchange.ws,out) { op,data,reply =>
                     if op == http::WS_TEXT {
@@ -332,10 +345,26 @@ thread_fn worker(cfg: http::Config) {
                             if exchange.commands.most==0 {admitted=http::gather_promise(exchange.commands,65536);}
                             var length: u8[4]=[0;4]; for i in 4 {length[i]=(data.len>>(8*i)) as! u8;}
                             if !admitted || !http::gather_piece(exchange.commands,length) || !http::gather_piece(exchange.commands,data) {http::ws_close(reply,exchange.ws,1009); http::ws_end(reply,exchange.ws);}
-                        } else {campfire::cable_message(db,exchange.user,settings.stream_key,data,exchange.presence,reply);}
+                        } else {
+                            campfire::cable_message(db,exchange.user,settings.stream_key,data,exchange.presence,
+                                cable,cable_conns,cable_targets,cable_storage,exchange.cable,exchange.cable_gen,reply);
+                        }
                     }
                 };
+                // A WebSocket close ends the exchange without CLOSED.
+                if !exchange.left && exchange.ws.done {
+                    for room in exchange.presence {if room>0 {campfire::presence_change(db,exchange.user,room,2);}}
+                    http::release_gather(exchange.commands); exchange.left = true;
+                    campfire::cable_leave(cable,cable_conns,cable_targets,cable_storage,exchange.cable,exchange.cable_gen);
+                }
             }
+            if !exchange.left && campfire::cable_owns(cable_conns,exchange.cable,exchange.cable_gen) {
+                cable_conns[exchange.cable].kicked = false;
+                campfire::cable_service(cable,cable_conns,cable_targets,cable_storage,exchange.cable,out);
+                exchange.fragmented = cable_conns[exchange.cable].offset != 0;
+            }
+            campfire::cable_pump(cable,cable_conns,cable_targets,cable_storage);
+            campfire::cable_credit(cable);
         } else if ev.kind == http::WAKE && ev.tag == campfire::CABLE_ACK {
             out.buf.append(http::gathered[exchange.response.at..exchange.response.at+exchange.response.len]);
             http::release_gather(exchange.response);
@@ -422,10 +451,11 @@ fn main() {
         publication_window=size;
     }
     let delivery_permits=publication_window+56;
+    settings.cable_window=publication_window;
     write_stderr(str("Publication acknowledgement: ",if queued_ack {"queued"} else {"drained"},"\n"));
     write_stderr(str("Publication window: ",publication_window,"; delivery permits: ",delivery_permits,"\n"));
     var cfg = http::Config { address: "0.0.0.0", port: 3000, workers: 4, max_conns: 1024,
-        mail_slots:128,mail_size:8192,max_waiting:1024,.. };
+        mail_size:campfire::CABLE_MAIL as i32,max_waiting:1024,.. };
     cfg.emulate_ring=backend=="emulated";
     cfg.require_ring=!settings.epoll && !cfg.emulate_ring;
     write_stderr(str("HTTP backend: ", if settings.epoll {"epoll"} else if cfg.emulate_ring {"emulated"} else {"io_uring"}, "\n"));
@@ -448,6 +478,10 @@ fn main() {
         guard ok && conns >= 64 && conns <= 65536 else { abort("invalid CAMPFIRE_HTTP_MAX_CONNS"); }
         cfg.max_conns = conns; cfg.max_waiting = conns;
     }
+    // A box takes a kick for each connection, the publication mails and the acknowledgements outstanding.
+    var slots: i64 = 2;
+    while slots < cfg.max_conns + 4*publication_window + 256 { slots *= 2; }
+    cfg.mail_slots = slots as i32;
     campfire::initialize_database(settings.database);
     qlimit<campfire::Publication>(delivery_permits); qlimit<campfire::CablePermit>(delivery_permits); qlimit<campfire::CableCommand>(65536);
     for i in delivery_permits { qput(campfire::CablePermit { .. }); }
