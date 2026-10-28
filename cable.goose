@@ -4,6 +4,7 @@ import json;
 import base64;
 import http;
 import http.websocket;
+import http.shared;
 import sqlite;
 import database;
 import view_data;
@@ -23,7 +24,8 @@ struct CableConnection {
     // Publications before credited have been credited to the window; those from credited to sequence wait on a drain.
     credited: i64 = 0
 }
-struct CableDelivery { reply: http::MailAddress, body: u8[:], remaining: i64 = 0 }
+// The broker owns body from enrollment to retirement, which waits until every enrolled worker drained or left.
+struct CableDelivery { reply: http::MailAddress, body: http::Shared = http::Shared { .. }, length: i64 = 0, remaining: i64 = 0 }
 let CABLE_WINDOW: i64 = 8;
 let CABLE_ENROLLED: i32 = 65536;
 let CABLE_JOIN: i32 = 1;
@@ -32,10 +34,13 @@ let CABLE_LEAVE: i32 = 3;
 let CABLE_UNSUBSCRIBE: i32 = 4;
 let CABLE_PUBLISH: i32 = 5;
 let CABLE_ACK: i32 = 256;
-// A delivery whose data is whole WebSocket frames; with 128 set, the last one ends its message.
+// A delivery describes WebSocket frames: inline runs and ranges of shared bodies; with 128 set, the last frame ends its message.
 let CABLE_FRAMED: i32 = 512;
-// The most bytes of frames one delivery carries: the HTTP mailbox slot size.
-let CABLE_BATCH: i64 = 8192;
+let CABLE_INLINE: u8 = 0;
+let CABLE_RANGE: u8 = 1;
+// The most frame bytes one delivery describes, and the most bytes its description takes: the mailbox slot size.
+let CABLE_BATCH: i64 = 32768;
+let CABLE_MAIL: i64 = 8192;
 
 fn cable_command(kind: i32, address: http::MailAddress) {
     qput(CableCommand { kind: kind, address: address, data: [], .. });
@@ -54,7 +59,6 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
     // The low 16 bits identify subscriptions; the high bit owns one completion credit.
     var targets: i32[>..] = [];
     reusable[] var storage: u8[>..] = [];
-    reusable[] var publications: u8[>..] = [];
     var window: CableDelivery[>..] = [];
     for _ in window_size { window.push(CableDelivery { .. }); }
     var head: i64 = 0;
@@ -63,6 +67,16 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
     var body: u8[>..] = [];
     var chunk: u8[>..] = [];
     var completed: i64[>..] = [];
+    // Where the description's open inline run starts, or -1.
+    var run: i64 = -1;
+    fn inline(bytes: const u8[:]) {
+        if run < 0 || chunk.len - run - 3 + bytes.len > 65535 {
+            run = chunk.len; chunk.push(CABLE_INLINE); chunk.push(0); chunk.push(0);
+        }
+        chunk.append(bytes);
+        let n = chunk.len - run - 3;
+        chunk[run+1] = n as! u8; chunk[run+2] = (n >> 8) as! u8;
+    }
 
     fn drop_connection(index: i64) {
         connections[index].live = false;
@@ -156,9 +170,13 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
                     if mask != 0 { mask |= CABLE_ENROLLED; window[slot].remaining++; }
                     targets[ci*window_size+slot] = mask;
                 }
-                if window[slot].remaining != 0 { json::format_string(body, pending.body); }
-                let encoded = publications.alloc_slice(body.len); copy_into(encoded, body);
-                window[slot].body = encoded;
+                window[slot].body = http::Shared { .. }; window[slot].length = 0;
+                if window[slot].remaining != 0 {
+                    json::format_string(body, pending.body);
+                    let shared, failed = http::shared_put(body, 1);
+                    assert(failed == 0);
+                    window[slot].body = shared; window[slot].length = body.len;
+                }
                 tail++;
             }
             if queued_ack {
@@ -189,12 +207,14 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
                     if mask & CABLE_ENROLLED != 0 { window[slot].remaining--; targets[ci*window_size+slot] = 0; }
                     c.sequence++; c.credited = c.sequence; c.offset = 0;
                 }
-                // Coalesce whole frames up to one mailbox slot; only a message larger than that is fragmented.
+                // Coalesce frames up to CABLE_BATCH; only a message larger than that is fragmented.
                 chunk.clear(); completed.clear();
                 var sequence = c.sequence;
                 var offset = c.offset;
                 var mask: i32 = if sequence < tail { targets[ci*window_size+(sequence & (window_size-1))] } else { 0 };
                 var whole = true;
+                var wire: i64 = 0;
+                run = -1;
                 while sequence < tail {
                     let slot = sequence & (window_size-1);
                     if mask & 65535 == 0 {
@@ -206,21 +226,33 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
                     while mask & (1 << subscription) == 0 { subscription++; }
                     let sub .= subscriptions[ci*16+subscription];
                     let prefix = sub.prefix;
-                    let payload = window[slot].body;
-                    let length = prefix.len + payload.len + 1;
-                    let room = CABLE_BATCH - chunk.len - 4;
-                    if length - offset > room && chunk.len > 0 { break; }
-                    let end = min(length, offset + room);
+                    let length = prefix.len + window[slot].length + 1;
+                    let room = CABLE_BATCH - wire - 4;
+                    // Besides inline identifier bytes, a frame's description takes at most 31 bytes.
+                    let space = CABLE_MAIL - chunk.len - 31;
+                    if wire > 0 && (length - offset > room || space < max(prefix.len - offset, 0)) { break; }
+                    var end = min(length, offset + room);
+                    // A long identifier's inline bytes must fit the description.
+                    if offset < prefix.len { end = min(end, offset + space); }
                     whole = end == length;
-                    chunk.push(((if offset == 0 { 1 } else { 0 }) | (if whole { 128 } else { 0 })) as! u8);
                     let size = end - offset;
-                    if size < 126 { chunk.push(size as! u8); }
-                    else { chunk.push(126); chunk.push((size >> 8) as! u8); chunk.push(size as! u8); }
-                    if offset < prefix.len { chunk.append(prefix[offset..min(end, prefix.len)]); }
-                    let start = max(offset, prefix.len);
-                    let stop = min(end, prefix.len + payload.len);
-                    if start < stop { chunk.append(payload[start-prefix.len..stop-prefix.len]); }
-                    if whole { chunk.push('}'); } else { offset = end; break; }
+                    var frame: u8[..4] = [];
+                    frame.push(((if offset == 0 { 1 } else { 0 }) | (if whole { 128 } else { 0 })) as! u8);
+                    if size < 126 { frame.push(size as! u8); }
+                    else { frame.push(126); frame.push((size >> 8) as! u8); frame.push(size as! u8); }
+                    inline(frame);
+                    if offset < prefix.len { inline(prefix[offset..min(end, prefix.len)]); }
+                    let start = max(offset, prefix.len) - prefix.len;
+                    let stop = min(end, prefix.len + window[slot].length) - prefix.len;
+                    if start < stop {
+                        chunk.push(CABLE_RANGE);
+                        for i in 8 { chunk.push((window[slot].body.h >> (8*i)) as! u8); }
+                        for i in 4 { chunk.push((start >> (8*i)) as! u8); }
+                        for i in 4 { chunk.push((stop >> (8*i)) as! u8); }
+                        run = -1;
+                    }
+                    wire += frame.len + size;
+                    if whole { inline("}"); } else { offset = end; break; }
                     completed.push(slot*16+subscription); mask &= ~(1 << subscription); offset = 0;
                 }
                 if chunk.len == 0 { continue; }
@@ -244,7 +276,7 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
                 if queued_ack {
                     if head == acknowledged { break; }
                 } else if http::mail_send(window[slot].reply, CABLE_ACK, "") == http::FULL { break; }
-                publications.free_slice(window[slot].body);
+                if window[slot].body.h != 0 { http::shared_release(window[slot].body); window[slot].body = http::Shared { .. }; }
                 head++;
                 assert(qput(CablePermit { .. }));
             }
@@ -253,8 +285,24 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
     }
 }
 
+fn cable_le(data: const u8[:], at: i64, n: i64) -> i64 {
+    var v: i64 = 0;
+    for i in n { v |= (data[at+i] as i64) << (8*i); }
+    return v;
+}
+
+// Sends a broker delivery's frames: its inline runs, and its ranges of bodies the broker keeps until this drains.
 fn cable_frame(out: http::Reply, data: const u8[:]) {
-    http::send(out, data);
+    var at: i64 = 0;
+    while at < data.len {
+        if data[at] == CABLE_INLINE {
+            let n = cable_le(data, at+1, 2);
+            http::send(out, data[at+3..at+3+n]); at += 3+n;
+        } else {
+            let body = http::Shared { h: cable_le(data, at+1, 8) };
+            assert(http::send_shared(out, body, cable_le(data, at+9, 4), cable_le(data, at+13, 4))); at += 17;
+        }
+    }
     http::after_drain(out);
 }
 

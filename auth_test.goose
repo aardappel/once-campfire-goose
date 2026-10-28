@@ -1,6 +1,6 @@
 import std;
 import hash from "github.com/kaitk/goose-hash@v0.0.4";
-import http from "github.com/kaitk/goose-http@555a723adc103a455ccc4cdf43bd4a9a96608a70";
+import http from "github.com/kaitk/goose-http@d10a3a3a63e0205bf1520319fb23926bdbb147cc";
 import auth;
 
 fn main() {

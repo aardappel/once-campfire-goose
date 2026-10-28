@@ -1,5 +1,5 @@
 import std;
-import http from "github.com/kaitk/goose-http@555a723adc103a455ccc4cdf43bd4a9a96608a70";
+import http from "github.com/kaitk/goose-http@d10a3a3a63e0205bf1520319fb23926bdbb147cc";
 import compress from "github.com/kaitk/goose-compress@v0.1.4";
 import cache;
 
