@@ -250,9 +250,14 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
                                            {"message[body]": marker + ("x" * 512 if batch_pressure else "&" * 40000), "message[client_message_id]": marker}, cookie)
                         accepted.append((marker, post))
                         try:
-                            assert post.result(timeout=.5)[0] == 200
+                            status = post.result(timeout=.5)[0]
                         except concurrent.futures.TimeoutError:
-                            break
+                            # A slow host can exceed .5 s without back-pressure; a held write never completes.
+                            try:
+                                status = post.result(timeout=2)[0]
+                            except concurrent.futures.TimeoutError:
+                                break
+                        assert status == 200
                     else:
                         raise AssertionError("slow reader did not apply back-pressure")
                     blocked = post
