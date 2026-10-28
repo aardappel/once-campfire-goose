@@ -439,6 +439,13 @@ fn main() {
         guard ok && workers > 0 && workers <= 256 else { abort("invalid CAMPFIRE_HTTP_THREADS"); }
         cfg.workers = workers;
     }
+    var conns_text: u8[>..] = [];
+    // Each worker's connections, and as many waiting cable exchanges.
+    if env("CAMPFIRE_HTTP_MAX_CONNS", conns_text) {
+        let conns, ok = parse_int(conns_text);
+        guard ok && conns >= 64 && conns <= 65536 else { abort("invalid CAMPFIRE_HTTP_MAX_CONNS"); }
+        cfg.max_conns = conns; cfg.max_waiting = conns;
+    }
     campfire::initialize_database(settings.database);
     qlimit<campfire::Publication>(delivery_permits); qlimit<campfire::CablePermit>(delivery_permits); qlimit<campfire::CableCommand>(65536);
     for i in delivery_permits { qput(campfire::CablePermit { .. }); }
