@@ -76,13 +76,19 @@ against current Jai. It records throughput, latency, memory, exact versions and 
 See [cache validation](docs/read-cache.md) for the read path and the historical
 [backend comparison](docs/backend-selection.md) for epoll versus ring modes.
 
-**Fan-out delivery (2026-10-28):** coalesced frames, shared bodies, zero-copy sends, a
-work-list broker and per-worker delivery roughly double complete fan-out at 64 readers and
-almost triple it at 2,000, with reads and posts unchanged and much lower delivery latency.
-With this broker, queued-8 matches larger windows on throughput at the lowest latency. The
-[fan-out delivery report](docs/fanout-delivery.md) has the changes, the preliminary local
-numbers, and the experiments that were tried and dropped. Authoritative results against Jai
-are pending. The comparison below predates these changes.
+**Fan-out delivery (2026-10-28):** the changes are coalesced frames, shared bodies,
+zero-copy sends, a work-list broker and per-worker delivery. Against current Jai, measured
+with the shared verifier on a Ryzen 7 PRO 6850U:
+
+- **64 readers:** fan-out reaches 1.34× Jai's at queued-8 and 1.04× with the default. CPU per
+  message is 0.63–0.68× Jai's, and delivery p99 is at or below Jai's.
+- **Jai's 2,000- and 10,000-client scenario:**
+  - Paced delivery latency is slightly better than Jai's.
+  - Memory is 0.07–0.23× Jai's.
+  - Saturated delivery rate is still 0.40–0.50× Jai's.
+
+The [fan-out delivery report](docs/fanout-delivery.md) has each change's effect and the
+experiments that were tried and dropped. The comparison below predates these changes.
 
 On 2026-10-26 PDT, queued windows of 8, 32, 128 and 512 reach median complete fan-out
 rates of 2,031, 2,266, 2,434 and 2,322 messages/s to all 64 readers. Jai reaches 3,448.

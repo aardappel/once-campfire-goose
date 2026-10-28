@@ -1,15 +1,47 @@
 # Fan-out delivery: coalescing, shared bodies, zero-copy sends and per-worker delivery
 
-Measured on 2026-10-28. **Preliminary:** every number below comes from same-session A/B runs
-on a MacBook (M1) under Docker's arm64 VM, with the server on 4 CPUs and the load generator on 6.
-There is no Jai build for arm64, so this report has no Goose/Jai ratios. Authoritative
-results against Jai, with the shared verifier, replace these when they are available.
+Measured on 2026-10-28. Results against Jai come from a Ryzen 7 PRO 6850U laptop (WSL2,
+Docker Engine) with the shared verifier, `benchmark_shared.py` and the published Jai image
+(`ghcr.io/lucasmeijer/once-campfire-jai@sha256:bbbe5c64…`). Every sample and scenario run
+validated, and the full suite and native io_uring tests passed. The per-change numbers come
+from same-session A/B runs on a MacBook (M1) under Docker's arm64 VM, where Jai doesn't run.
 
-Unless stated otherwise: 64 WebSocket readers with 6 subscriptions each, 4 posters, queued
-acknowledgement, rotated rounds, medians. "Fan-out" is complete messages per second, each
-received by every reader.
+"Fan-out" is complete messages per second, each received by every reader. Unless stated
+otherwise: 64 WebSocket readers with 6 subscriptions each, 4 posters, rotated rounds, medians.
 
-## Result
+## Against Jai (6850U, same-run ratios)
+
+64 readers (`benchmark_shared.py`), Goose / Jai fan-out on epoll:
+
+| revision | queued-8 | queued-128 | default (drained, 8) |
+|---|---:|---:|---:|
+| upstream `37189c6` | 0.58–0.63× | 0.60–0.65× | — |
+| `d33b4c3` (changes 1–3) | 0.87–0.95× | 0.94–0.95× | — |
+| `4b78473` (changes 1–7) | 0.93–0.96× | 0.89–0.94× | 0.63–0.66× |
+| **`cf542ab` (all changes)** | **1.34×** | **1.35×** | **1.04×** |
+
+At `cf542ab`, Goose uses 0.63–0.68× Jai's CPU per message. Its delivery p99 is 3.7–4.1 ms
+queued and 2.5–2.7 ms with the default, against 4.0–4.1 ms for Jai, and its POST p99 is
+lower than Jai's. On native io_uring the ratios are 1.38×, 1.39× and 1.08×. Posts were
+already about 1.55× Jai's, and memory about a third.
+
+Jai's own fan-out scenario (`bench/scenarios/fanout`, DEFLATE=0: 30 posts 200 ms apart, then
+4 posters for 15 s), `cf542ab` / Jai:
+
+| | 2,000 clients | 10,000 clients |
+|---|---:|---:|
+| paced delivery p50 / p99 | 0.93× / 0.94× | 0.96× / 0.95× |
+| saturated delivery rate | 0.50× (`4b78473`: 0.21×) | 0.40× (0.24×) |
+| saturated CPU per delivery | 2.0× | 2.5× |
+| paced CPU per delivery | 1.16× | 0.95× |
+| peak anonymous memory | 0.07× (20 MiB vs 297) | 0.23× (43 vs 188) |
+
+At this scale Goose now matches Jai's latency and CPU for paced traffic, and uses a small
+fraction of its memory. Under saturation Jai still delivers twice as fast, at half the CPU per
+delivery. The rate also varies more between rounds for Goose (86 against 125–132 msg/s at 2,000).
+Uneven connection counts across workers are a possible cause that hasn't been tested.
+
+## Against the baseline (M1, same session)
 
 Against upstream `37189c6` (the head of `codex/campfire-experiment` and goose-http v0.5.11):
 
@@ -101,10 +133,9 @@ So nobody needs to redo them:
   noise on throughput (2,878–3,018 msg/s), and queued-8 has the lowest delivery p99 (6.7 vs
   10.1 ms at 128); at 2,000 readers queued-8 matches queued-128 as well. A large window no
   longer buys throughput.
-- **Native io_uring as the default backend:** on the laptop it passed its tests but wasn't
-  ≥ epoll (fan-out tied after drift, posts tied, queued-128 delivery p99 worse, memory
-  +20–27%), so the default stays epoll. Step 7 now also covers io_uring, so this is worth
-  rechecking.
+- **Native io_uring as the default backend:** at `d33b4c3` it passed its tests but wasn't ≥
+  epoll (memory +20–27%). After step 7 it led epoll by 8–29% at `4b78473`, but after step 8
+  the lead is about +3% fan-out, with about 20% more memory. The default stays epoll.
 - **The second timer re-arm per delivery** (`http::later` at WAKE and again at DRAINED):
   ~1% in the profile. Unchanged.
 - **Zero-copy under TLS:** not attempted. Sealing needs contiguous plaintext, and
