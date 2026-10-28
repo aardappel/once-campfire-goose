@@ -299,7 +299,7 @@ thread_fn worker(cfg: http::Config) {
         } else if exchange.upgraded {
             if ev.kind == http::WAKE {
                 exchange.fragmented = (ev.tag & 128) == 0;
-                campfire::cable_frame(out,ev.tag,ev.data); http::later(out,3000);
+                campfire::cable_frame(out,ev.data); http::later(out,3000);
             } else if ev.kind == http::DRAINED {
                 if !exchange.fragmented && exchange.commands.len>0 {
                     let end=exchange.commands.at+exchange.commands.len; var at=exchange.commands.at;

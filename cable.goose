@@ -15,10 +15,13 @@ struct CableCommand {
     kind: i32, address: http::MailAddress, user: i64 = 0, room: i64 = 0,
     stream: i32 = 0, data: u8[]
 }
-struct CableSubscriber { live: bool = false, retiring: bool = false, room: i64, stream: i32, identifier: u8[:] }
+// prefix caches the encoded `{"identifier":...,"message":` that starts each delivery.
+struct CableSubscriber { live: bool = false, retiring: bool = false, room: i64, stream: i32, identifier: u8[:], prefix: u8[:] }
 struct CableConnection {
     live: bool = false, address: http::MailAddress, user: i64,
-    ready: bool = true, sequence: i64 = 0, offset: i64 = 0
+    ready: bool = true, sequence: i64 = 0, offset: i64 = 0,
+    // Publications before credited have been credited to the window; those from credited to sequence wait on a drain.
+    credited: i64 = 0
 }
 struct CableDelivery { reply: http::MailAddress, body: u8[:], remaining: i64 = 0 }
 let CABLE_WINDOW: i64 = 8;
@@ -29,6 +32,10 @@ let CABLE_LEAVE: i32 = 3;
 let CABLE_UNSUBSCRIBE: i32 = 4;
 let CABLE_PUBLISH: i32 = 5;
 let CABLE_ACK: i32 = 256;
+// A delivery whose data is whole WebSocket frames; with 128 set, the last one ends its message.
+let CABLE_FRAMED: i32 = 512;
+// The most bytes of frames one delivery carries: the HTTP mailbox slot size.
+let CABLE_BATCH: i64 = 8192;
 
 fn cable_command(kind: i32, address: http::MailAddress) {
     qput(CableCommand { kind: kind, address: address, data: [], .. });
@@ -54,8 +61,8 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
     var tail: i64 = 0;
     var acknowledged: i64 = 0;
     var body: u8[>..] = [];
-    var prefix: u8[>..] = [];
     var chunk: u8[>..] = [];
+    var completed: i64[>..] = [];
 
     fn drop_connection(index: i64) {
         connections[index].live = false;
@@ -65,7 +72,7 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
         }
         for &sub in subscriptions[index*16..index*16+16] {
             if sub.live || sub.retiring {
-                storage.free_slice(sub.identifier);
+                storage.free_slice(sub.identifier); storage.free_slice(sub.prefix);
                 sub.live = false; sub.retiring = false;
             }
         }
@@ -85,7 +92,7 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
                     for _ in 0..16 { subscriptions.push(CableSubscriber { .. }); }
                     for _ in 0..window_size { targets.push(0); }
                 }
-                connections[index] = CableConnection { live: true, address: command.address, user: command.user, sequence: tail, .. };
+                connections[index] = CableConnection { live: true, address: command.address, user: command.user, sequence: tail, credited: tail, .. };
             }
             var duplicate = false;
             var slot: i64 = -1;
@@ -97,7 +104,9 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
             }
             if !duplicate && count < 16 {
                 let id = storage.alloc_slice(command.data.len); copy_into(id, command.data);
-                let sub = CableSubscriber { live: true, room: command.room, stream: command.stream, identifier: id, .. };
+                chunk.clear(); chunk.append("{\"identifier\":"); json::format_string(chunk, command.data); chunk.append(",\"message\":");
+                let prefix = storage.alloc_slice(chunk.len); copy_into(prefix, chunk);
+                let sub = CableSubscriber { live: true, room: command.room, stream: command.stream, identifier: id, prefix: prefix, .. };
                 subscriptions[index*16+slot] = sub;
             }
         } else if index >= 0 && command.kind == CABLE_CREDIT {
@@ -112,7 +121,7 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
                     let partial = connections[index].offset != 0 && (mask & (1 << si)) != 0 && (mask & ((1 << si)-1)) == 0;
                     sub.live = false; sub.retiring = partial;
                     // An already-started WebSocket message must finish before its identifier can be reused.
-                    if !partial { storage.free_slice(sub.identifier); }
+                    if !partial { storage.free_slice(sub.identifier); storage.free_slice(sub.prefix); }
                     for &target, slot in targets[index*window_size..(index+1)*window_size] {
                         if !partial || slot != current { target &= ~(1 << si); }
                     }
@@ -161,46 +170,70 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
                 }
             }
             for &c, ci in connections {
-                c.sequence = max(c.sequence, head);
-                if !c.live || c.sequence == tail { continue; }
+                c.sequence = max(c.sequence, head); c.credited = max(c.credited, head);
+                if !c.live || c.sequence == tail && c.credited == tail { continue; }
                 if !c.ready {
                     if !http::mail_live(c.address) { drop_connection(ci); }
                     continue;
                 }
+                // The drained batch's final sends keep their completion credits until now.
+                while c.credited < c.sequence {
+                    let slot = c.credited & (window_size-1);
+                    if targets[ci*window_size+slot] & CABLE_ENROLLED != 0 { window[slot].remaining--; targets[ci*window_size+slot] = 0; }
+                    c.credited++;
+                }
                 while c.sequence < tail {
                     let slot = c.sequence & (window_size-1);
                     let mask = targets[ci*window_size+slot];
+                    if mask & 65535 != 0 { break; }
+                    if mask & CABLE_ENROLLED != 0 { window[slot].remaining--; targets[ci*window_size+slot] = 0; }
+                    c.sequence++; c.credited = c.sequence; c.offset = 0;
+                }
+                // Coalesce whole frames up to one mailbox slot; only a message larger than that is fragmented.
+                chunk.clear(); completed.clear();
+                var sequence = c.sequence;
+                var offset = c.offset;
+                var mask: i32 = if sequence < tail { targets[ci*window_size+(sequence & (window_size-1))] } else { 0 };
+                var whole = true;
+                while sequence < tail {
+                    let slot = sequence & (window_size-1);
                     if mask & 65535 == 0 {
-                        // A final send keeps its completion credit until the next drain event.
-                        if mask & CABLE_ENROLLED != 0 { window[slot].remaining--; targets[ci*window_size+slot] = 0; }
-                        c.sequence++; c.offset = 0;
+                        sequence++; offset = 0;
+                        if sequence < tail { mask = targets[ci*window_size+(sequence & (window_size-1))]; }
                         continue;
                     }
                     var subscription: i64 = 0;
                     while mask & (1 << subscription) == 0 { subscription++; }
                     let sub .= subscriptions[ci*16+subscription];
+                    let prefix = sub.prefix;
                     let payload = window[slot].body;
-                    prefix.clear(); prefix.append("{\"identifier\":");
-                    json::format_string(prefix, sub.identifier); prefix.append(",\"message\":");
                     let length = prefix.len + payload.len + 1;
-                    let end = min(c.offset + 8192, length);
-                    chunk.clear();
-                    if c.offset < prefix.len { chunk.append(prefix[c.offset..min(end, prefix.len)]); }
-                    let start = max(c.offset, prefix.len);
+                    let room = CABLE_BATCH - chunk.len - 4;
+                    if length - offset > room && chunk.len > 0 { break; }
+                    let end = min(length, offset + room);
+                    whole = end == length;
+                    chunk.push(((if offset == 0 { 1 } else { 0 }) | (if whole { 128 } else { 0 })) as! u8);
+                    let size = end - offset;
+                    if size < 126 { chunk.push(size as! u8); }
+                    else { chunk.push(126); chunk.push((size >> 8) as! u8); chunk.push(size as! u8); }
+                    if offset < prefix.len { chunk.append(prefix[offset..min(end, prefix.len)]); }
+                    let start = max(offset, prefix.len);
                     let stop = min(end, prefix.len + payload.len);
                     if start < stop { chunk.append(payload[start-prefix.len..stop-prefix.len]); }
-                    if end == length { chunk.push('}'); }
-                    let tag = ((if c.offset == 0 { 1 } else { 0 }) | (if end == length { 128 } else { 0 })) as i32;
-                    let sent = http::mail_send(c.address, tag, chunk);
-                    if sent == http::STALE { drop_connection(ci); break; }
-                    if sent == http::SENT {
-                        c.ready = false; c.offset = end;
-                        if end == length {
-                            targets[ci*window_size+slot] &= ~(1 << subscription); c.offset = 0;
-                            if sub.retiring { storage.free_slice(sub.identifier); subscriptions[ci*16+subscription].retiring = false; }
-                        }
+                    if whole { chunk.push('}'); } else { offset = end; break; }
+                    completed.push(slot*16+subscription); mask &= ~(1 << subscription); offset = 0;
+                }
+                if chunk.len == 0 { continue; }
+                let sent = http::mail_send(c.address, CABLE_FRAMED | (if whole { 128 } else { 0 }), chunk);
+                if sent == http::STALE { drop_connection(ci); continue; }
+                if sent == http::SENT {
+                    c.ready = false; c.sequence = sequence; c.offset = offset;
+                    for done in completed {
+                        let subscription = done & 15;
+                        targets[ci*window_size+(done >> 4)] &= ~(1 << subscription);
+                        let sub .= subscriptions[ci*16+subscription];
+                        if sub.retiring { storage.free_slice(sub.identifier); storage.free_slice(sub.prefix); subscriptions[ci*16+subscription].retiring = false; }
                     }
-                    break;
                 }
             }
             let previous = head;
@@ -220,11 +253,8 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
     }
 }
 
-fn cable_frame(out: http::Reply, tag: i32, data: const u8[:]) {
-    var head: u8[..4] = []; head.push(tag as! u8);
-    if data.len < 126 { head.push(data.len as! u8); }
-    else { head.push(126); head.push((data.len >> 8) as! u8); head.push(data.len as! u8); }
-    http::send(out, head); http::send(out, data);
+fn cable_frame(out: http::Reply, data: const u8[:]) {
+    http::send(out, data);
     http::after_drain(out);
 }
 
