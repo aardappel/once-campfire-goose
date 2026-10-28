@@ -45,6 +45,8 @@ struct Exchange {
     ws: http::WebSocket = http::WebSocket { .. },
     upgraded: bool = false,
     fragmented: bool = false,
+    // A broker delivery was sent since the last credit; other drains (pings, confirmations) earn none.
+    delivering: bool = false,
     user: i64 = 0,
     presence: i64[16] = [0;16],
 }
@@ -298,7 +300,7 @@ thread_fn worker(cfg: http::Config) {
             }
         } else if exchange.upgraded {
             if ev.kind == http::WAKE {
-                exchange.fragmented = (ev.tag & 128) == 0;
+                exchange.fragmented = (ev.tag & 128) == 0; exchange.delivering = true;
                 campfire::cable_frame(out,ev.data); http::later(out,3000);
             } else if ev.kind == http::DRAINED {
                 if !exchange.fragmented && exchange.commands.len>0 {
@@ -310,7 +312,8 @@ thread_fn worker(cfg: http::Config) {
                     }
                     http::release_gather(exchange.commands);
                 }
-                campfire::cable_command(campfire::CABLE_CREDIT,http::later(out,3000));
+                let address=http::later(out,3000);
+                if exchange.delivering { exchange.delivering=false; campfire::cable_command(campfire::CABLE_CREDIT,address); }
             } else if ev.kind == http::TIMEOUT {
                 var now: u8[>..] = []; campfire_sql_now(now);
                 if !exchange.fragmented {http::ws_send(out,http::WS_TEXT,str("{\"type\":\"ping\",\"message\":",campfire::campfire_epoch_ms(now)/1000,"}"));}
