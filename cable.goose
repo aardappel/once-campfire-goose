@@ -22,7 +22,9 @@ struct CableConnection {
     live: bool = false, address: http::MailAddress, user: i64,
     ready: bool = true, sequence: i64 = 0, offset: i64 = 0,
     // Publications before credited have been credited to the window; those from credited to sequence wait on a drain.
-    credited: i64 = 0
+    credited: i64 = 0,
+    // Listed in the broker's next delivery pass.
+    queued: bool = false
 }
 // The broker owns body from enrollment to retirement, which waits until every enrolled worker drained or left.
 struct CableDelivery { reply: http::MailAddress, body: http::Shared = http::Shared { .. }, length: i64 = 0, remaining: i64 = 0 }
@@ -35,15 +37,17 @@ let CABLE_UNSUBSCRIBE: i32 = 4;
 let CABLE_PUBLISH: i32 = 5;
 let CABLE_ACK: i32 = 256;
 // A delivery describes WebSocket frames: inline runs and ranges of shared bodies; with 128 set, the last frame ends its message.
+// Its tag's bits from CABLE_INDEX up name the broker's connection, which the worker's credit returns.
 let CABLE_FRAMED: i32 = 512;
+let CABLE_INDEX: i32 = 10;
 let CABLE_INLINE: u8 = 0;
 let CABLE_RANGE: u8 = 1;
 // The most frame bytes one delivery describes, and the most bytes its description takes: the mailbox slot size.
 let CABLE_BATCH: i64 = 32768;
 let CABLE_MAIL: i64 = 8192;
 
-fn cable_command(kind: i32, address: http::MailAddress) {
-    qput(CableCommand { kind: kind, address: address, data: [], .. });
+fn cable_command(kind: i32, address: http::MailAddress, index: i64 = -1) {
+    qput(CableCommand { kind: kind, address: address, room: index, data: [], .. });
 }
 
 fn publish(room: i64, reply: http::MailAddress, body: const u8[:]) {
@@ -67,6 +71,12 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
     var body: u8[>..] = [];
     var chunk: u8[>..] = [];
     var completed: i64[>..] = [];
+    // The connections the next delivery pass visits: credited, enrolled, unsubscribed or refused for a full box.
+    var todo: i64[>..] = [];
+    var pass: i64[>..] = [];
+    fn mark(index: i64) {
+        if !connections[index].queued { connections[index].queued = true; todo.push(index); }
+    }
     // Where the description's open inline run starts, or -1.
     var run: i64 = -1;
     fn inline(bytes: const u8[:]) {
@@ -96,7 +106,10 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
     }
     fn apply_command(command: const CableCommand&) {
         var index: i64 = -1;
-        for &c, i in connections { if c.live && c.address == command.address { index = i; break; } }
+        // A credit names its connection, checked against the address in case the slot was reused.
+        let named = command.room;
+        if command.kind == CABLE_CREDIT && named >= 0 && named < connections.len && connections[named].live && connections[named].address == command.address { index = named; }
+        else { for &c, i in connections { if c.live && c.address == command.address { index = i; break; } } }
         if command.kind == CABLE_JOIN {
             if index < 0 {
                 for &c, i in connections { if !c.live { index = i; break; } }
@@ -123,8 +136,9 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
                 let sub = CableSubscriber { live: true, room: command.room, stream: command.stream, identifier: id, prefix: prefix, .. };
                 subscriptions[index*16+slot] = sub;
             }
+            mark(index);
         } else if index >= 0 && command.kind == CABLE_CREDIT {
-            connections[index].ready = true;
+            connections[index].ready = true; mark(index);
         } else if index >= 0 && command.kind == CABLE_LEAVE {
             drop_connection(index);
         } else if index >= 0 && command.kind == CABLE_UNSUBSCRIBE {
@@ -139,6 +153,7 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
                     for &target, slot in targets[index*window_size..(index+1)*window_size] {
                         if !partial || slot != current { target &= ~(1 << si); }
                     }
+                    mark(index);
                 }
             }
         }
@@ -167,7 +182,7 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
                             if matches(sub, c.user, pending.room) { mask |= 1 << si; }
                         }
                     }
-                    if mask != 0 { mask |= CABLE_ENROLLED; window[slot].remaining++; }
+                    if mask != 0 { mask |= CABLE_ENROLLED; window[slot].remaining++; mark(ci); }
                     targets[ci*window_size+slot] = mask;
                 }
                 window[slot].body = http::Shared { .. }; window[slot].length = 0;
@@ -187,7 +202,10 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
                     acknowledged++;
                 }
             }
-            for &c, ci in connections {
+            pass.clear(); pass.append(todo); todo.clear();
+            for ci in pass {
+                let c .= connections[ci];
+                c.queued = false;
                 c.sequence = max(c.sequence, head); c.credited = max(c.credited, head);
                 if !c.live || c.sequence == tail && c.credited == tail { continue; }
                 if !c.ready {
@@ -256,8 +274,9 @@ thread_fn cable_broker(queued_ack: bool, window_size: i64) {
                     completed.push(slot*16+subscription); mask &= ~(1 << subscription); offset = 0;
                 }
                 if chunk.len == 0 { continue; }
-                let sent = http::mail_send(c.address, CABLE_FRAMED | (if whole { 128 } else { 0 }), chunk);
+                let sent = http::mail_send(c.address, CABLE_FRAMED | (if whole { 128 } else { 0 }) | ((ci as i32) << CABLE_INDEX), chunk);
                 if sent == http::STALE { drop_connection(ci); continue; }
+                if sent == http::FULL { mark(ci); }
                 if sent == http::SENT {
                     c.ready = false; c.sequence = sequence; c.offset = offset;
                     for done in completed {
