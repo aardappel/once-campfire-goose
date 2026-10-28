@@ -41,7 +41,7 @@ fn html_decode(source: const u8[:]) -> u8[>..] {
     var out: u8[>..]=[]; var i: i64=0;
     while i<source.len {
         if source[i]=='&' {
-            let end=find(source[i..],";");
+            let end=find(source[i..min(source.len,i+17)],";");
             if end>0 && end<=16 {
                 let entity=source[i+1..i+end]; var c: i64=-1;
                 if entity=="amp" { c=38; } else if entity=="lt" { c=60; } else if entity=="gt" { c=62; }

@@ -41,7 +41,7 @@ fn rich_text(out: u8[>..]&, source: const u8[:]) {
     var i: i64 = 0;
     while i < source.len {
         if source[i] == '&' {
-            let end = find(source[i..], ";");
+            let end = find(source[i..min(source.len, i + 17)], ";");
             if end > 1 && end <= 16 {
                 let entity = source[i + 1..i + end];
                 var valid = entity == "amp" || entity == "lt" || entity == "gt" || entity == "quot" || entity == "apos" || entity == "nbsp";
