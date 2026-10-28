@@ -322,9 +322,9 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
                     fast.close()
                     peer.close()
             # Readers spread over the workers by SO_REUSEPORT. Each worker matches and writes its own readers;
-            # some hold connections without subscriptions. Every worker's first connection, which receives the
-            # broker's mail for it, is a stalled reader that disconnects while it holds active publications;
-            # later, representatives leave by WebSocket Close during a publication.
+            # some hold connections without subscriptions. Every worker's first connection is a stalled reader that
+            # disconnects while it holds active publications; later, readers leave by WebSocket Close during a
+            # publication.
             for connection in sockets:
                 connection.close()
             time.sleep(.5)
@@ -378,7 +378,7 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
                         assert post.result(timeout=1)[0] == 200
                     except concurrent.futures.TimeoutError:
                         break
-                # Stalled readers, the representatives among them, leave while they hold active publications.
+                # Stalled readers, every worker's first connection among them, leave while they hold active publications.
                 for reader in stalled:
                     reader.close()
                 assert post.result(timeout=20)[0] == 200, "a departed reader held retirement"
@@ -398,7 +398,7 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
             sockets.append(fresh)
             assert fresh.subscribe(identifier) == "confirm_subscription"
             publish_all(["spread-9100"], [fresh])
-            print(f"PASS: signed subscriptions, fragmented and multi-subscription delivery, unsubscribe/reuse, ordered {window_size}-publication pipelining, late enrollment, {delivery_permits} retained delivery permits, bounded rejected-write memory, {'queued' if queued_ack else 'drained'} acknowledgements, disconnect recovery, readers spread over workers with departing representatives, and presence cleanup")
+            print(f"PASS: signed subscriptions, fragmented and multi-subscription delivery, unsubscribe/reuse, ordered {window_size}-publication pipelining, late enrollment, {delivery_permits} retained delivery permits, bounded rejected-write memory, {'queued' if queued_ack else 'drained'} acknowledgements, disconnect recovery, readers spread over workers with departing stalled readers, and presence cleanup")
         except BaseException:
             log.seek(0)
             print(log.read(), file=sys.stderr)

@@ -39,7 +39,12 @@ Jai's own fan-out scenario (`bench/scenarios/fanout`, DEFLATE=0: 30 posts 200 ms
 At this scale Goose now matches Jai's latency and CPU for paced traffic, and uses a small
 fraction of its memory. Under saturation Jai still delivers twice as fast, at half the CPU per
 delivery. The rate also varies more between rounds for Goose (86 against 125–132 msg/s at 2,000).
-Uneven connection counts across workers are a possible cause that hasn't been tested.
+Uneven readers per worker don't explain it: SO_REUSEPORT spreads the 2,000 connections within
+±4% of even across the workers. The local collapses we saw came from the host (see
+[local bench pitfalls](#local-bench-pitfalls)).
+
+Step 9 has not been measured against Jai on the 6850U yet; locally it lifts saturated delivery
+at 2,000 readers by 11% over `cf542ab`.
 
 ## Against the baseline (M1, same session)
 
@@ -97,25 +102,35 @@ queued-128, with ~40% less CPU per message.
    Against step 5 on the same goose-http pin: 64 readers +23% fan-out, CPU/msg −30%;
    2,000 readers +51% fan-out, CPU per delivery −46%, paced delivery p50 28 → 18 ms.
 
+9. **Worker addresses and the empty-recv skip** (`a62f2f8`, goose-http pin
+   `v0.5.11-campfire.2`). goose-http now gives each worker a mail address of its own, delivered
+   as a WORKER event, and lets a worker wake its own exchanges without a mailbox slot. The broker
+   mails that address instead of one of the worker's connections, so the representative
+   connection, its hand-over when it leaves and the per-connection kick mail are gone (the box
+   shrinks from 2,048 slots to 512 at window 8). The same pin skips the recv after a wake when
+   the socket was found empty and no edge has come since: at 2,000 readers, 6 s of saturated
+   fan-out made 1,775 `recvfrom` calls instead of 1,819,379, nearly half the server's syscalls. Against `cf542ab` rebuilt on the same pin, same session, 3 rotated rounds: 2,000
+   readers saturated 298.0 → 331.5 msg/s (+11%), server CPU per message 9.5 → 8.9 ms (−7%),
+   delivery p99 66 → 55 ms; at a fixed 2,000-reader load CPU per message −6%; 64 readers
+   4,730 → 4,850 msg/s (+2.5%), CPU/msg −3%. Reads and posts are unchanged.
+
 Steps 7 and 8 together: 64 readers 4,177 msg/s (3,204 with step 7 alone, 3,796 with step 8
 alone); 2,000 readers 7.6 µs CPU per delivery (16.8 and 10.0).
 
-### Delivery semantics after step 8
+### Delivery semantics after steps 8 and 9
 
 Ordering, bounded memory, stalled-reader retirement, unsubscribe cancelling unsent
 deliveries, finishing an already-started message before its identifier is reused, the
 window, permits and 503 on exhaustion are unchanged; see
-[browser coverage](browser-parity.md). Two things moved:
+[browser coverage](browser-parity.md). One thing moved: a publication enrolls a worker's
+subscribers when it reaches that worker, so a subscription confirmed between broker
+enrollment and that moment receives it, a slightly later, still causal, cut-off.
 
-- A publication enrolls a worker's subscribers when it reaches that worker, so a
-  subscription confirmed between broker enrollment and that moment receives it: a
-  slightly later, still causal, cut-off.
-- goose-http mail goes only to a waiting exchange, so each worker names one of its cable
-  connections as the broker's address for it and names another when that one leaves; the
-  broker resends from that worker's position. Local wake-ups of the worker's other readers
-  are mail to their own addresses in the same box, which is now 2,048 slots of 128 bytes per
-  worker by default (was 128 of 8 KiB). A worker-level address in goose-http would remove
-  most of this.
+The broker mails each worker at its goose-http worker address, and a worker wakes its ready
+readers locally; neither depends on any one connection staying open. A worker whose last
+connection leaves is credited at once and skipped, and is enrolled in later publications
+when it has connections again. Each worker's box holds 4 × window + 256 slots of 128 bytes
+(512 at window 8; it was 128 of 8 KiB before step 8).
 
 It also fixes a gap: a client's WebSocket Close ended its exchange without CLOSED, so its
 presence was never cleaned up. Workers now run the same leave and presence cleanup.
@@ -132,7 +147,14 @@ So nobody needs to redo them:
 - **Larger publication windows after step 5:** queued 8, 16, 32, 64 and 128 are within
   noise on throughput (2,878–3,018 msg/s), and queued-8 has the lowest delivery p99 (6.7 vs
   10.1 ms at 128); at 2,000 readers queued-8 matches queued-128 as well. A large window no
-  longer buys throughput.
+  longer buys throughput. After step 9 at 2,000 saturated readers, queued 8, 64 and 128
+  gave 313.5, 309.4 and 298.0 msg/s, with p99 63, 67 and 68 ms (3 rounds). The window
+  doesn't decide how many frames a write carries here; see [Jai's design](#jais-design).
+- **A limit on kicks in flight per worker** (fork branch `fanout-batch`), so that publication
+  mail interleaves with a long round of kicks: limits of 8, 32 and 128 at 2,000 readers were
+  within the spread of the runs (k8 against the head: 169.9 vs 172.0, 262.9 vs 250.1 and
+  294.5 vs 260.7 msg/s over three A/Bs, heads ranging 226–288). Step 9 removed the kick
+  mail it was bounding.
 - **Native io_uring as the default backend:** at `d33b4c3` it passed its tests but wasn't ≥
   epoll (memory +20–27%). After step 7 it led epoll by 8–29% at `4b78473`, but after step 8
   the lead is about +3% fan-out, with about 20% more memory. The default stays epoll.
@@ -140,6 +162,38 @@ So nobody needs to redo them:
   ~1% in the profile. Unchanged.
 - **Zero-copy under TLS:** not attempted. Sealing needs contiguous plaintext, and
   encryption is a copy anyway.
+
+## Jai's design
+
+Jai has no broker. The thread that handles a POST matches the subscribers itself and appends
+a reference to the shared frame to each subscriber's outbox, under that connection's mutex,
+then wakes the connection's event loop. The loop swaps the outbox out and writes it oldest
+first, up to 64 frames per `writev`. An outbox holds up to 4,096 frames before the poster
+waits for that subscriber (65,536 before a broadcast that can't wait disconnects it), so a
+POST is acknowledged once its message is queued for every subscriber, and publications from
+concurrent posts proceed in parallel.
+
+Goose orders every publication through one broker thread, and retires a publication only
+after every enrolled reader's batch has drained to its socket, through a global window of 8 by
+default (up to 512). Each worker mails the broker one credit per publication. A reader writes as
+soon as it is ready, which with fast clients is almost always, so a write carries what arrived
+since the last one: 1.2–1.4 deliveries per `sendmsg` at 2,000 saturated readers on the 6850U,
+where about 75% of the server's CPU is the kernel's send path. A larger window only lets more publications
+queue up in the broker; it doesn't hold writes back, so it doesn't batch them (above). The
+levers left are batching per reader (writing on a worker's tick, or after its pending mail,
+instead of on every arrival) and a bound per worker or per reader in place of the global
+window.
+
+## Local bench pitfalls
+
+- The verifier's load generator is client-bound on arm64: its scalar `str::contains` over every
+  received frame saturates the client cores before the server. Locally we use a variant that
+  searches with `memchr` (`campfire-benchbox:fast`) and give the server 3 cores and the client 7.
+- A laptop that sleeps or throttles mid-run collapses a round (25–90 msg/s against ~300 at 2,000
+  readers, p99 over a second). Docker Desktop reports no steal time, so the harness can't detect
+  it; keep the machine awake and rerun rounds that collapse.
+- Compare only within one session, in rotated rounds: the same image's medians moved by more
+  between sessions than most changes measured here.
 
 ## Method
 

@@ -30,7 +30,7 @@ growth above a 16 MiB allowance, and verifies complete recovery after disconnect
 readers advance through exactly eight active publications while the slow reader is stalled.
 They receive the same ordered sequence across window reuse; a late subscriber receives
 only publications enrolled after it joins. Readers spread over the HTTP workers receive the
-same ordered publications while each worker's representative connection stalls and then
+same ordered publications while each worker's first connection stalls and then
 disconnects, and while others leave by WebSocket Close; once every worker is empty, a new
 reader is enrolled afresh.
 First-run and HTTP regression tests continue to check authorization,
@@ -41,19 +41,18 @@ atomic persistence, write rollback, cache invalidation, and concurrent posting.
 Each admitted mutating HTTP request reserves one of 64 publication permits before writing.
 An asynchronous broker orders publications and pipelines at most eight. It retains one
 encoded body per active publication and mails each HTTP worker that has a cable connection
-one reference to it, through one of that worker's connections (its representative), so its
+one reference to it, at that worker's own goose-http mail address, so its
 work per publication grows with the number of workers, not readers. Each worker owns its
 connections' subscriptions and delivery state. It snapshots its matching subscriptions when
 a publication reaches it, so subscriptions added later do not inherit it, and wakes each
-ready reader with a mail to that reader's own address. Each reader writes at most one 32 KiB
+ready reader with a local wake that takes no mailbox slot. Each reader writes at most one 32 KiB
 batch of whole frames per goose-http drain credit, from the shared body, and completes its
 publications in order; only a larger message is fragmented. An unsubscribe cancels unsent
 deliveries; an already-started WebSocket message finishes before its identifier can be reused.
 Client commands received between fragments wait in a bounded 64 KiB buffer.
 Each connection keeps at most 16 subscriptions. A worker credits the broker once all its
-enrolled readers drained a publication or left. When its representative leaves, the worker
-names another and the broker resends what that worker has not received; a worker without
-connections is credited at once and skipped. Disconnected readers, including those that end
+enrolled readers drained a publication or left. A worker without connections is credited
+at once and skipped; when it has connections again, it is enrolled in later publications. Disconnected readers, including those that end
 with a WebSocket Close, are removed, and each worker checks its readers' addresses in turn.
 A message POST is acknowledged only after its transaction
 commits and every enrolled subscriber's batches have reached their socket, or the subscriber
