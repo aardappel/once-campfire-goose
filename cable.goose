@@ -310,8 +310,13 @@ fn cable_receive(shard: CableShard&, conns: CableLocal[>..]&, targets: i32[>..]&
         var enrolled: i64 = 0;
         for &c, ci in conns {
             var mask: i32 = 0;
-            if c.live && c.mask != 0 {
-                for sub, si in c.subs { if cable_matches(sub, c.user, room) { mask |= 1 << si; } }
+            if c.live {
+                var live = c.mask;
+                var si: i64 = 0;
+                while live != 0 {
+                    if live & 1 != 0 && cable_matches(c.subs[si], c.user, room) { mask |= 1 << si; }
+                    live >>= 1; si++;
+                }
             }
             if mask != 0 {
                 mask |= CABLE_ENROLLED; enrolled++;

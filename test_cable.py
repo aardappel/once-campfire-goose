@@ -321,7 +321,85 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
                     slow.close()
                     fast.close()
                     peer.close()
-            print(f"PASS: signed subscriptions, fragmented and multi-subscription delivery, unsubscribe/reuse, ordered {window_size}-publication pipelining, late enrollment, {delivery_permits} retained delivery permits, bounded rejected-write memory, {'queued' if queued_ack else 'drained'} acknowledgements, disconnect recovery and presence cleanup")
+            # Readers spread over the workers by SO_REUSEPORT. Each worker matches and writes its own readers;
+            # some hold connections without subscriptions. Every worker's first connection, which receives the
+            # broker's mail for it, is a stalled reader that disconnects while it holds active publications;
+            # later, representatives leave by WebSocket Close during a publication.
+            for connection in sockets:
+                connection.close()
+            time.sleep(.5)
+            def spread_markers(reader, count):
+                seen = []
+                while len(seen) < count:
+                    seen.append(re.search(r"spread-\d+", reader.publication())[0])
+                return seen
+            def publish_all(markers, readers_now, leaving=()):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(markers)) as pool:
+                    posts = [pool.submit(request, "/rooms/1/messages", {"message[body]": marker,
+                                                                        "message[client_message_id]": marker}, cookie)
+                             for marker in markers]
+                    # A WebSocket Close ends the exchange without CLOSED.
+                    for reader in leaving:
+                        reader.frame(b"\x03\xe8", 0x88)
+                    for reader in readers_now:
+                        assert sorted(spread_markers(reader, len(markers))) == sorted(markers)
+                    assert all(post.result(timeout=20)[0] == 200 for post in posts)
+            stalled = [WebSocket(port, cookie, receive_buffer=1024) for _ in range(8)]
+            spread = [WebSocket(port, cookie) for _ in range(16)]
+            sockets.extend(stalled + spread)
+            subscribed = spread[:12]
+            for reader in stalled + subscribed:
+                assert reader.subscribe(identifier) == "confirm_subscription"
+            stalled += subscribed[2:4]
+            remaining = subscribed[:2] + subscribed[4:]
+            spread_received = {reader: [] for reader in remaining}
+            spread_errors = []
+            def read_spread(reader):
+                try:
+                    while True:
+                        marker = re.search(r"spread-(\d+|end)", reader.publication())[0]
+                        if marker == "spread-end":
+                            return
+                        spread_received[reader].append(marker)
+                except BaseException as error:
+                    spread_errors.append(error)
+            spread_threads = [threading.Thread(target=read_spread, args=(reader,), daemon=True) for reader in remaining]
+            for thread in spread_threads:
+                thread.start()
+            spread_posted = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                for n in range(400):
+                    marker = f"spread-{n}"
+                    post = pool.submit(request, "/rooms/1/messages", {"message[body]": marker + "&" * 40000,
+                                                                      "message[client_message_id]": marker}, cookie)
+                    spread_posted.append(marker)
+                    try:
+                        assert post.result(timeout=1)[0] == 200
+                    except concurrent.futures.TimeoutError:
+                        break
+                else:
+                    raise AssertionError("stalled representatives did not apply back-pressure")
+                # Stalled readers, the representatives among them, leave while they hold active publications.
+                for reader in stalled:
+                    reader.close()
+                assert post.result(timeout=20)[0] == 200, "a departed reader held retirement"
+            for reader in spread[12:]:
+                reader.close()
+            assert request("/rooms/1/messages", {"message[body]": "spread-end", "message[client_message_id]": "spread-end"}, cookie)[0] == 200
+            for thread in spread_threads:
+                thread.join(timeout=20)
+            assert not spread_errors and not any(thread.is_alive() for thread in spread_threads), spread_errors
+            assert all(received == spread_posted for received in spread_received.values()), "readers on other workers lost or reordered publications"
+            publish_all([f"spread-{9000 + n}" for n in range(3)], remaining[1::2], remaining[::2])
+            for reader in remaining:
+                reader.close()
+            time.sleep(.5)
+            # Every worker is empty again; a new reader is enrolled afresh.
+            fresh = WebSocket(port, cookie)
+            sockets.append(fresh)
+            assert fresh.subscribe(identifier) == "confirm_subscription"
+            publish_all(["spread-9100"], [fresh])
+            print(f"PASS: signed subscriptions, fragmented and multi-subscription delivery, unsubscribe/reuse, ordered {window_size}-publication pipelining, late enrollment, {delivery_permits} retained delivery permits, bounded rejected-write memory, {'queued' if queued_ack else 'drained'} acknowledgements, disconnect recovery, readers spread over workers with departing representatives, and presence cleanup")
         except BaseException:
             log.seek(0)
             print(log.read(), file=sys.stderr)
