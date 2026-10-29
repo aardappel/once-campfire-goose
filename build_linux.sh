@@ -18,8 +18,8 @@ if [ "${1:-}" != "--build-only" ]; then
     for backend in auto epoll emulated; do
         CAMPFIRE_HTTP_BACKEND="$backend" python3 test_cable.py build/campfire
         CAMPFIRE_HTTP_BACKEND="$backend" python3 test_cable.py build/campfire --batch-pressure
-        CAMPFIRE_PUBLICATION_ACK=queued CAMPFIRE_HTTP_BACKEND="$backend" python3 test_cable.py build/campfire
-        CAMPFIRE_PUBLICATION_ACK=queued CAMPFIRE_HTTP_BACKEND="$backend" python3 test_cable.py build/campfire --batch-pressure
+        CAMPFIRE_PUBLICATION_ACK=drained CAMPFIRE_HTTP_BACKEND="$backend" python3 test_cable.py build/campfire
+        CAMPFIRE_PUBLICATION_ACK=drained CAMPFIRE_HTTP_BACKEND="$backend" python3 test_cable.py build/campfire --batch-pressure
         CAMPFIRE_HTTP_BACKEND="$backend" python3 test_server.py build/campfire
         CAMPFIRE_HTTP_BACKEND="$backend" python3 test_server.py build/campfire --no-cache
     done
@@ -34,7 +34,7 @@ if [ "${1:-}" != "--build-only" ]; then
         CAMPFIRE_CABLE_BATCH="$batch" CAMPFIRE_HTTP_BACKEND=epoll python3 test_cable.py build/campfire
         CAMPFIRE_PUBLICATION_ACK=queued CAMPFIRE_CABLE_BATCH="$batch" CAMPFIRE_HTTP_BACKEND=epoll python3 test_cable.py build/campfire --batch-pressure
     done
-    for readers in 1 4; do
+    for readers in 0 1 4; do
         CAMPFIRE_CABLE_PASS_READERS="$readers" CAMPFIRE_HTTP_BACKEND=epoll python3 test_cable.py build/campfire
         CAMPFIRE_PUBLICATION_ACK=queued CAMPFIRE_CABLE_PASS_READERS="$readers" CAMPFIRE_HTTP_BACKEND=epoll python3 test_cable.py build/campfire --batch-pressure
     done

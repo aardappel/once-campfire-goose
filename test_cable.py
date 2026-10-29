@@ -107,7 +107,7 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
         available.bind(("127.0.0.1", 0))
         port = available.getsockname()[1]
     environment = dict(os.environ, DATABASE_PATH=str(database), HTTP_PORT=str(port), SECRET_KEY_BASE=secrets.token_hex(64))
-    queued_ack = environment.get("CAMPFIRE_PUBLICATION_ACK", "drained") == "queued"
+    queued_ack = environment.get("CAMPFIRE_PUBLICATION_ACK", "queued") == "queued"
     window_size = int(environment.get("CAMPFIRE_PUBLICATION_WINDOW", "8"))
     delivery_permits = window_size + 56
     if "--batch-pressure" in sys.argv[2:]:

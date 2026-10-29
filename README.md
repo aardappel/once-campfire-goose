@@ -78,16 +78,16 @@ against current Jai. It records throughput, latency, memory, exact versions and 
 See [cache validation](docs/read-cache.md) for the read path and the historical
 [backend comparison](docs/backend-selection.md) for epoll versus ring modes.
 
-**Fan-out delivery (2026-10-28):** the changes are coalesced frames, shared bodies,
-zero-copy sends, a work-list broker and per-worker delivery. Against current Jai, measured
-with the shared verifier on a Ryzen 7 PRO 6850U:
+**Fan-out delivery (2026-10-28/29):** the changes are coalesced 256 KiB frames, shared bodies,
+zero-copy sends, a work-list broker, per-worker delivery and a per-pass cap on reader writes.
+Publications are now acknowledged once queued, as Jai does; `CAMPFIRE_PUBLICATION_ACK=drained`
+restores the final-drain acknowledgement. Against current Jai on a Ryzen 7 5800X3D:
 
-- **64 readers:** fan-out reaches 1.34× Jai's at queued-8 and 1.04× with the default. CPU per
-  message is 0.63–0.68× Jai's, and delivery p99 is at or below Jai's.
+- **64 readers:** fan-out reaches 1.37–1.45× Jai's at about 0.6× its CPU per message.
 - **Jai's 2,000- and 10,000-client scenario:**
-  - Paced delivery latency is slightly better than Jai's.
-  - Memory is 0.07–0.23× Jai's.
-  - Saturated delivery rate is still 0.40–0.50× Jai's.
+  - Saturated delivery rate is 0.61× and 0.78× Jai's (0.32× and 0.31× before these defaults).
+  - Saturated delivery p99 is 67 and 248 ms, against Jai's 4.8 and 15 s.
+  - Memory is 0.05–0.06× Jai's; paced latency is on par.
 
 The [fan-out delivery report](docs/fanout-delivery.md) has each change's effect and the
 experiments that were tried and dropped. The comparison below predates these changes.
@@ -103,11 +103,10 @@ versus Jai's 316.6k and 4.41k. Anonymous memory after fan-out is 28.11 MiB versu
 for Jai. Large-message stalled-reader RSS rises from 33.49 MiB at eight to 56.36 at 128
 and 134.55 at 512; these pressure-test samples describe a different workload.
 
-All larger sizes remain opt-in: set `CAMPFIRE_PUBLICATION_ACK=queued` and
-`CAMPFIRE_PUBLICATION_WINDOW` to a power of two from 8 through 512. Total retained
+Larger sizes remain opt-in: set `CAMPFIRE_PUBLICATION_WINDOW` to a power of two from 8
+through 512 (queued acknowledgement, now the default, is required). Total retained
 delivery permits equal the window plus 56 and are released only after final drain.
-The default remains final-drain acknowledgement with eight active publications and
-64 permits. The [earlier policy-only comparison](docs/queued-acknowledgements.md)
+The default is queued acknowledgement with eight active publications and 64 permits. The [earlier policy-only comparison](docs/queued-acknowledgements.md)
 records the separate 24.2% gain from queued acknowledgements at the original bounds.
 The report preserves an unreproduced native io_uring pressure-setup failure alongside
 passing reruns; all performance measurements use epoll.

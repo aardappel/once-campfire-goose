@@ -111,7 +111,7 @@ def main():
     parser.add_argument("--apps", default="goose,rust,jai")
     parser.add_argument("--goose-image", default="once-campfire-goose:app")
     parser.add_argument("--goose-backend", choices=("auto", "epoll", "uring", "emulated"), help="override the Goose image's event loop")
-    parser.add_argument("--goose-publication-ack", choices=("drained", "queued"), default="drained", help="select the HTTP acknowledgement stage for Goose publications")
+    parser.add_argument("--goose-publication-ack", choices=("drained", "queued"), default="queued", help="select the HTTP acknowledgement stage for Goose publications")
     parser.add_argument("--goose-publication-window", type=int, choices=(8, 16, 32, 64, 128, 256, 512), default=8)
     parser.add_argument("--goose-queued-windows", help="comma-separated queued windows to compare in rotated order using the same image")
     parser.add_argument("--goose-seccomp", type=Path, help="optional container policy for Goose, recorded by SHA-256")

@@ -32,6 +32,8 @@ let CABLE_KICK: i32 = 258;
 let CABLE_ENROLLED: i32 = 65536;
 // The most frame bytes one batch writes before waiting for its drain, unless CAMPFIRE_CABLE_BATCH sets it.
 let CABLE_BATCH: i64 = 262144;
+// The most cable connections a worker wakes per pass of its loop, unless CAMPFIRE_CABLE_PASS_READERS sets it.
+let CABLE_PASS: i64 = 16;
 // A publication record: sequence, room, shared body and its length. A mailbox slot holds four.
 let CABLE_RECORD: i64 = 32;
 let CABLE_MAIL: i64 = 128;

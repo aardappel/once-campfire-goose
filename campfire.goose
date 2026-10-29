@@ -452,7 +452,7 @@ fn main() {
         guard publication_ack=="drained" || publication_ack=="queued"
             else {abort("CAMPFIRE_PUBLICATION_ACK must be drained or queued");}
     }
-    let queued_ack = publication_ack=="queued";
+    let queued_ack = publication_ack!="drained";
     var publication_window: i64 = campfire::CABLE_WINDOW;
     var window_text: u8[>..]=[];
     if env("CAMPFIRE_PUBLICATION_WINDOW",window_text) {
@@ -486,13 +486,13 @@ fn main() {
         settings.cable_pace_frames=n;
     }
     write_stderr(str("Publication window: ",publication_window,"; delivery permits: ",delivery_permits,"\n"));
-    // Experimental: wake at most this many cable connections per pass of a worker's loop (fanout-pass-cap).
+    // Wake at most this many cable connections per pass of a worker's loop; 0 wakes every ready one.
     var pass_text: u8[>..]=[];
     if env("CAMPFIRE_CABLE_PASS_READERS",pass_text) {
         let n, ok = parse_int(pass_text);
         guard ok && n>=0 && n<=65536 else {abort("CAMPFIRE_CABLE_PASS_READERS must be from 0 through 65536");}
         settings.cable_pass=n;
-    }
+    } else { settings.cable_pass=campfire::CABLE_PASS; }
     write_stderr(str("Cable batch: ",settings.cable_batch,"; pass readers: ",settings.cable_pass,"; pace: ",settings.cable_pace," ms, ",settings.cable_pace_frames," frames\n"));
     var cfg = http::Config { address: "0.0.0.0", port: 3000, workers: 4, max_conns: 1024,
         mail_size:campfire::CABLE_MAIL as i32,max_waiting:1024,.. };
