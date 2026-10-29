@@ -465,7 +465,8 @@ fn main() {
             else {abort("CAMPFIRE_CABLE_BATCH must be a power of two from 16384 through 1048576");}
         settings.cable_batch=size;
     } else { settings.cable_batch=campfire::CABLE_BATCH; }
-    write_stderr(str("Publication window: ",publication_window,"; delivery permits: ",delivery_permits,"; cable batch: ",settings.cable_batch,"\n"));
+    write_stderr(str("Publication window: ",publication_window,"; delivery permits: ",delivery_permits,"\n"));
+    write_stderr(str("Cable batch: ",settings.cable_batch,"\n"));
     var cfg = http::Config { address: "0.0.0.0", port: 3000, workers: 4, max_conns: 1024,
         mail_size:campfire::CABLE_MAIL as i32,max_waiting:1024,.. };
     cfg.emulate_ring=backend=="emulated";
