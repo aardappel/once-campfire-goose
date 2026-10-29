@@ -213,6 +213,36 @@ publications pending (frames per send 1.9 → 3.1), and CPU per message falls 17
 only 3 frames per send, against pacing's 8, and pacing on top of it gains nothing, because pacing
 already keeps passes short. Saturated p99 rises 10–20%: a reader's frames wait for its chunk.
 
+## Write pacing (experimental, branch `fanout-pace`)
+
+Why Goose writes ~2 frames per `sendmsg` at saturation: posts are handled on the same worker
+loops that write to the readers, so a POST waits behind a pass of sends, and publications arrive
+only as fast as every reader drains. No reader builds a backlog, and neither a 256 KiB–1 MiB batch
+nor a queued window of 64–512 changed that (2.0–2.4 frames per send at 2,000 readers). Jai handles
+posts on their own threads, so its outboxes fill while the loop is busy.
+
+`CAMPFIRE_CABLE_PACE_MS` holds a reader's next batch back until D ms after its last write, unless
+`CAMPFIRE_CABLE_PACE_FRAMES` (16) publications wait; a reader idle for D ms writes at once, so
+paced latency doesn't change. The window must hold D ms of publications, but a larger one only
+queues more: posts fill every permit, and p99 grows to the queue's depth. M1 laptop, 2,000
+saturated readers, queued acknowledgement, 3 rotated rounds, medians:
+
+| window, pace | msg/s | saturated p99 | CPU per message | frames per send | anon |
+|---|---:|---:|---:|---:|---:|
+| 64, off | 320 | 63 ms | 8.9 ms | 2.0 | 19–22 MiB |
+| 16, 10 ms | 339 | 87 ms | 7.3 ms | 4.4 | 18–20 MiB |
+| 16, 20 ms | 411 | 80 ms | 5.7 ms | 9.5 | 19–20 MiB |
+| 16, 30 ms | 400 | 95 ms | 5.3 ms | 13.2 | 13–24 MiB |
+| 32, 20 ms | 407 | 106 ms | 5.8 ms | 9.4 | 18–20 MiB |
+| 32, 30 ms | 423 | 119 ms | 5.3 ms | 14.3 | 16–18 MiB |
+| 64, 40 ms | 387 | 327 ms | 4.7 ms | 16.5 | 110–150 MiB |
+| 512, 40 ms | 465 | 643 ms | 4.8 ms | 18.5 | 212–320 MiB |
+
+Window 16 with 20 ms gives about +28% at +17 ms of p99 and no extra memory. Longer pacing raises
+frames per send but not throughput here. The memory of the large-window runs is goose-http copying
+the unsent part of a send that the socket didn't take into each connection's own buffer. At
+10,000 readers each reader gets a frame only every ~20 ms, so pacing there needs ~100 ms.
+
 ## Local bench pitfalls
 
 - The verifier's load generator is client-bound on arm64: its scalar `str::contains` over every

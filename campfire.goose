@@ -37,6 +37,8 @@ struct Settings {
     cable_window: i64 = 8,
     cable_batch: i64 = 262144,
     cable_pass: i64 = 0,
+    cable_pace: i64 = 0,
+    cable_pace_frames: i64 = 16,
 }
 
 var settings = Settings { .. };
@@ -297,7 +299,8 @@ thread_fn worker(cfg: http::Config) {
     reusable[] var cable_storage: u8[>..] = [];
     var cable_conns: campfire::CableLocal[>..] = [];
     var cable_targets: i32[>..] = [];
-    var cable = campfire::CableShard { window: settings.cable_window, batch: settings.cable_batch, pass: settings.cable_pass, .. };
+    var cable = campfire::CableShard { window: settings.cable_window, batch: settings.cable_batch,
+        pace: settings.cable_pace, pace_frames: settings.cable_pace_frames, pass: settings.cable_pass, .. };
     let e = serve_app(cfg, Exchange { .. }) { ev, exchange, out =>
         if ev.kind == http::WORKER {
             // Publications the broker mailed the worker: its readers enroll, and wake to write.
@@ -335,7 +338,9 @@ thread_fn worker(cfg: http::Config) {
                 http::later(out,3000);
             } else if ev.kind == http::TIMEOUT {
                 var now: u8[>..] = []; campfire_sql_now(now);
-                if !exchange.fragmented {http::ws_send(out,http::WS_TEXT,str("{\"type\":\"ping\",\"message\":",campfire::campfire_epoch_ms(now)/1000,"}"));}
+                // A paced connection's timer is not the keepalive: publications are flowing.
+                let paced = campfire::cable_owns(cable_conns,exchange.cable,exchange.cable_gen) && cable_conns[exchange.cable].paced;
+                if !exchange.fragmented && !paced {http::ws_send(out,http::WS_TEXT,str("{\"type\":\"ping\",\"message\":",campfire::campfire_epoch_ms(now)/1000,"}"));}
                 http::after_drain(out); http::later(out,3000);
                 campfire::cable_probe(cable,cable_conns,cable_targets,cable_storage);
             } else {
@@ -366,7 +371,8 @@ thread_fn worker(cfg: http::Config) {
             }
             if !exchange.left && campfire::cable_owns(cable_conns,exchange.cable,exchange.cable_gen) {
                 campfire::cable_arrived(cable,cable_conns[exchange.cable]);
-                campfire::cable_service(cable,cable_conns,cable_targets,cable_storage,exchange.cable,out);
+                let due = campfire::cable_service(cable,cable_conns,cable_targets,cable_storage,exchange.cable,out);
+                if due > 0 { http::later(out,due); }
                 exchange.fragmented = cable_conns[exchange.cable].offset != 0;
             }
             campfire::cable_pump(cable,cable_conns,cable_targets,cable_storage);
@@ -466,6 +472,19 @@ fn main() {
             else {abort("CAMPFIRE_CABLE_BATCH must be a power of two from 16384 through 1048576");}
         settings.cable_batch=size;
     } else { settings.cable_batch=campfire::CABLE_BATCH; }
+    // Experimental: pace each cable connection's writes under load (fanout-pace).
+    var pace_text: u8[>..]=[];
+    if env("CAMPFIRE_CABLE_PACE_MS",pace_text) {
+        let ms, ok = parse_int(pace_text);
+        guard ok && ms>=0 && ms<=1000 else {abort("CAMPFIRE_CABLE_PACE_MS must be from 0 through 1000");}
+        settings.cable_pace=ms;
+    }
+    var pace_frames_text: u8[>..]=[];
+    if env("CAMPFIRE_CABLE_PACE_FRAMES",pace_frames_text) {
+        let n, ok = parse_int(pace_frames_text);
+        guard ok && n>=1 && n<=512 else {abort("CAMPFIRE_CABLE_PACE_FRAMES must be from 1 through 512");}
+        settings.cable_pace_frames=n;
+    }
     write_stderr(str("Publication window: ",publication_window,"; delivery permits: ",delivery_permits,"\n"));
     // Experimental: wake at most this many cable connections per pass of a worker's loop (fanout-pass-cap).
     var pass_text: u8[>..]=[];
@@ -474,7 +493,7 @@ fn main() {
         guard ok && n>=0 && n<=65536 else {abort("CAMPFIRE_CABLE_PASS_READERS must be from 0 through 65536");}
         settings.cable_pass=n;
     }
-    write_stderr(str("Cable batch: ",settings.cable_batch,"; pass readers: ",settings.cable_pass,"\n"));
+    write_stderr(str("Cable batch: ",settings.cable_batch,"; pass readers: ",settings.cable_pass,"; pace: ",settings.cable_pace," ms, ",settings.cable_pace_frames," frames\n"));
     var cfg = http::Config { address: "0.0.0.0", port: 3000, workers: 4, max_conns: 1024,
         mail_size:campfire::CABLE_MAIL as i32,max_waiting:1024,.. };
     cfg.emulate_ring=backend=="emulated";

@@ -10,6 +10,8 @@ import database;
 import view_data;
 import sessions;
 
+extern fn campfire_clock_ms() -> i64;
+
 struct CablePermit { value: bool = true }
 struct Publication { room: i64, reply: http::MailAddress, body: u8[] }
 // A report to the broker: its kind, the reporting worker's address, and a publication sequence.
@@ -196,6 +198,8 @@ struct CableLocal {
     sequence: i64 = 0, offset: i64 = 0,
     // Publications before credited are released; those from credited to sequence wait on a drain.
     credited: i64 = 0,
+    // When the connection last wrote, and whether it holds a paced batch back until its timer.
+    wrote_ms: i64 = 0, paced: bool = false,
     // The live subscriptions, by slot.
     mask: i32 = 0,
     subs: CableSubscriber[16] = [CableSubscriber { .. }; 16],
@@ -209,6 +213,8 @@ struct CableShard {
     window: i64 = 8,
     // The most frame bytes one batch writes.
     batch: i64 = 262144,
+    // Under load, a connection writes at most once per pace ms unless pace_frames publications wait; 0 is off.
+    pace: i64 = 0, pace_frames: i64 = 16,
     // The next sequence expected, the first not done by every enrolled connection, and the last credit reported.
     next: i64 = 0, done: i64 = 0, reported: i64 = 0,
     // The live connections.
@@ -317,7 +323,7 @@ fn cable_receive(shard: CableShard&, conns: CableLocal[>..]&, targets: i32[>..]&
             }
             if mask != 0 {
                 mask |= CABLE_ENROLLED; enrolled++;
-                if c.ready && !c.kicked { c.kicked = true; cable_list(shard, ci); cable_list(shard, c.gen); }
+                if c.ready && !c.kicked && !c.paced { c.kicked = true; cable_list(shard, ci); cable_list(shard, c.gen); }
             }
             targets[ci*w+slot] = mask;
         }
@@ -373,11 +379,12 @@ fn cable_probe(shard: CableShard&, conns: CableLocal[>..]&, targets: i32[>..]&, 
 }
 
 // Writes the connection's next batch once its last one drained: frames in publication order from the
-// shared bodies, coalesced up to shard.batch. Only a message larger than that is fragmented.
-fn cable_service(shard: CableShard&, conns: CableLocal[>..]&, targets: i32[>..]&, storage: u8[>..]&, index: i64, out: http::Reply) {
+// shared bodies, coalesced up to shard.batch. Only a message larger than that is fragmented. Returns the ms
+// to wait before writing a batch that pacing holds back, or 0.
+fn cable_service(shard: CableShard&, conns: CableLocal[>..]&, targets: i32[>..]&, storage: u8[>..]&, index: i64, out: http::Reply) -> i64 {
     let w = shard.window;
     let c .= conns[index];
-    guard c.live && c.ready && out.stream.open else { return; }
+    guard c.live && c.ready && out.stream.open else { return 0; }
     c.sequence = max(c.sequence, shard.done); c.credited = max(c.credited, shard.done);
     // The drained batch's final messages keep their publications until now.
     while c.credited < c.sequence {
@@ -391,6 +398,14 @@ fn cable_service(shard: CableShard&, conns: CableLocal[>..]&, targets: i32[>..]&
         if targets[at] & CABLE_ENROLLED != 0 { shard.entries[c.sequence & (w-1)].remaining--; targets[at] = 0; }
         c.sequence++; c.credited = c.sequence; c.offset = 0;
     }
+    // A connection that wrote within the last pace ms waits for its timer, unless enough publications wait.
+    if shard.pace > 0 && c.sequence < shard.next {
+        let now = campfire_clock_ms();
+        let due = c.wrote_ms + shard.pace - now;
+        if due > 0 && shard.next - c.sequence < shard.pace_frames { c.paced = true; return due; }
+        c.wrote_ms = now;
+    }
+    c.paced = false;
     var wire: i64 = 0;
     while c.sequence < shard.next {
         let slot = c.sequence & (w-1);
@@ -426,6 +441,7 @@ fn cable_service(shard: CableShard&, conns: CableLocal[>..]&, targets: i32[>..]&
         c.offset = 0;
     }
     if wire > 0 { http::after_drain(out); c.ready = false; }
+    return 0;
 }
 
 fn cable_join(conns: CableLocal[>..]&, storage: u8[>..]&, index: i64, room: i64, stream: i32, identifier: const u8[:]) {
