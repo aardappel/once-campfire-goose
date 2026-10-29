@@ -29,7 +29,7 @@ let CABLE_PUBS: i32 = 257;
 let CABLE_KICK: i32 = 258;
 let CABLE_ENROLLED: i32 = 65536;
 // The most frame bytes one batch writes before waiting for its drain, unless CAMPFIRE_CABLE_BATCH sets it.
-let CABLE_BATCH: i64 = 32768;
+let CABLE_BATCH: i64 = 262144;
 // A publication record: sequence, room, shared body and its length. A mailbox slot holds four.
 let CABLE_RECORD: i64 = 32;
 let CABLE_MAIL: i64 = 128;
@@ -206,7 +206,7 @@ struct CableEntry { room: i64 = 0, body: http::Shared = http::Shared { .. }, len
 struct CableShard {
     window: i64 = 8,
     // The most frame bytes one batch writes.
-    batch: i64 = 32768,
+    batch: i64 = 262144,
     // The next sequence expected, the first not done by every enrolled connection, and the last credit reported.
     next: i64 = 0, done: i64 = 0, reported: i64 = 0,
     // The live connections.

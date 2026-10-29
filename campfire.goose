@@ -35,7 +35,7 @@ struct Settings {
     cache_diagnostics: bool = false,
     epoll: bool = true,
     cable_window: i64 = 8,
-    cable_batch: i64 = 32768,
+    cable_batch: i64 = 262144,
 }
 
 var settings = Settings { .. };
