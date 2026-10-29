@@ -35,6 +35,7 @@ struct Settings {
     cache_diagnostics: bool = false,
     epoll: bool = true,
     cable_window: i64 = 8,
+    cable_batch: i64 = 32768,
 }
 
 var settings = Settings { .. };
@@ -295,7 +296,7 @@ thread_fn worker(cfg: http::Config) {
     reusable[] var cable_storage: u8[>..] = [];
     var cable_conns: campfire::CableLocal[>..] = [];
     var cable_targets: i32[>..] = [];
-    var cable = campfire::CableShard { window: settings.cable_window, .. };
+    var cable = campfire::CableShard { window: settings.cable_window, batch: settings.cable_batch, .. };
     let e = serve_app(cfg, Exchange { .. }) { ev, exchange, out =>
         if ev.kind == http::WORKER {
             // Publications the broker mailed the worker: its readers enroll, and wake to write.
@@ -457,7 +458,14 @@ fn main() {
     let delivery_permits=publication_window+56;
     settings.cable_window=publication_window;
     write_stderr(str("Publication acknowledgement: ",if queued_ack {"queued"} else {"drained"},"\n"));
-    write_stderr(str("Publication window: ",publication_window,"; delivery permits: ",delivery_permits,"\n"));
+    var batch_text: u8[>..]=[];
+    if env("CAMPFIRE_CABLE_BATCH",batch_text) {
+        let size, ok = parse_int(batch_text);
+        guard ok && size>=16384 && size<=1048576 && (size & (size-1))==0
+            else {abort("CAMPFIRE_CABLE_BATCH must be a power of two from 16384 through 1048576");}
+        settings.cable_batch=size;
+    } else { settings.cable_batch=campfire::CABLE_BATCH; }
+    write_stderr(str("Publication window: ",publication_window,"; delivery permits: ",delivery_permits,"; cable batch: ",settings.cable_batch,"\n"));
     var cfg = http::Config { address: "0.0.0.0", port: 3000, workers: 4, max_conns: 1024,
         mail_size:campfire::CABLE_MAIL as i32,max_waiting:1024,.. };
     cfg.emulate_ring=backend=="emulated";

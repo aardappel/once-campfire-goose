@@ -28,7 +28,7 @@ let CABLE_PUBS: i32 = 257;
 // A wake a worker gives one of its own connections, so that its loop calls it to write.
 let CABLE_KICK: i32 = 258;
 let CABLE_ENROLLED: i32 = 65536;
-// The most frame bytes one batch writes before waiting for its drain.
+// The most frame bytes one batch writes before waiting for its drain, unless CAMPFIRE_CABLE_BATCH sets it.
 let CABLE_BATCH: i64 = 32768;
 // A publication record: sequence, room, shared body and its length. A mailbox slot holds four.
 let CABLE_RECORD: i64 = 32;
@@ -205,6 +205,8 @@ struct CableEntry { room: i64 = 0, body: http::Shared = http::Shared { .. }, len
 // worker receives a publication: later subscribers do not inherit it.
 struct CableShard {
     window: i64 = 8,
+    // The most frame bytes one batch writes.
+    batch: i64 = 32768,
     // The next sequence expected, the first not done by every enrolled connection, and the last credit reported.
     next: i64 = 0, done: i64 = 0, reported: i64 = 0,
     // The live connections.
@@ -349,7 +351,7 @@ fn cable_probe(shard: CableShard&, conns: CableLocal[>..]&, targets: i32[>..]&, 
 }
 
 // Writes the connection's next batch once its last one drained: frames in publication order from the
-// shared bodies, coalesced up to CABLE_BATCH. Only a message larger than that is fragmented.
+// shared bodies, coalesced up to shard.batch. Only a message larger than that is fragmented.
 fn cable_service(shard: CableShard&, conns: CableLocal[>..]&, targets: i32[>..]&, storage: u8[>..]&, index: i64, out: http::Reply) {
     let w = shard.window;
     let c .= conns[index];
@@ -378,15 +380,17 @@ fn cable_service(shard: CableShard&, conns: CableLocal[>..]&, targets: i32[>..]&
         let prefix = sub.prefix;
         let entry = shard.entries[slot];
         let length = prefix.len + entry.length + 1;
-        let room = CABLE_BATCH - wire - 4;
+        // A frame's header takes 4 bytes, or 10 once its payload may reach 64 KiB.
+        let room = shard.batch - wire - (if shard.batch - wire > 65539 { 10 } else { 4 });
         if wire > 0 && length - c.offset > room { break; }
         let end = min(length, c.offset + room);
         let whole = end == length;
         let size = end - c.offset;
-        var frame: u8[..4] = [];
+        var frame: u8[..10] = [];
         frame.push(((if c.offset == 0 { 1 } else { 0 }) | (if whole { 128 } else { 0 })) as! u8);
         if size < 126 { frame.push(size as! u8); }
-        else { frame.push(126); frame.push((size >> 8) as! u8); frame.push(size as! u8); }
+        else if size < 65536 { frame.push(126); frame.push((size >> 8) as! u8); frame.push(size as! u8); }
+        else { frame.push(127); for i in 8 { frame.push((size >> (8*(7-i))) as! u8); } }
         http::send(out, frame);
         if c.offset < prefix.len { http::send(out, prefix[c.offset..min(end, prefix.len)]); }
         let start = max(c.offset, prefix.len) - prefix.len;
