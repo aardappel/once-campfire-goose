@@ -483,7 +483,8 @@ fn main() {
         guard ok && n>=1 && n<=512 else {abort("CAMPFIRE_CABLE_PACE_FRAMES must be from 1 through 512");}
         settings.cable_pace_frames=n;
     }
-    write_stderr(str("Publication window: ",publication_window,"; delivery permits: ",delivery_permits,"; cable batch: ",settings.cable_batch,"; pace: ",settings.cable_pace," ms, ",settings.cable_pace_frames," frames\n"));
+    write_stderr(str("Publication window: ",publication_window,"; delivery permits: ",delivery_permits,"\n"));
+    write_stderr(str("Cable batch: ",settings.cable_batch,"; pace: ",settings.cable_pace," ms, ",settings.cable_pace_frames," frames\n"));
     var cfg = http::Config { address: "0.0.0.0", port: 3000, workers: 4, max_conns: 1024,
         mail_size:campfire::CABLE_MAIL as i32,max_waiting:1024,.. };
     cfg.emulate_ring=backend=="emulated";
