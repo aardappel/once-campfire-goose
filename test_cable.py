@@ -398,7 +398,27 @@ with tempfile.TemporaryDirectory(prefix="campfire-cable-") as temporary:
             sockets.append(fresh)
             assert fresh.subscribe(identifier) == "confirm_subscription"
             publish_all(["spread-9100"], [fresh])
-            print(f"PASS: signed subscriptions, fragmented and multi-subscription delivery, unsubscribe/reuse, ordered {window_size}-publication pipelining, late enrollment, {delivery_permits} retained delivery permits, bounded rejected-write memory, {'queued' if queued_ack else 'drained'} acknowledgements, disconnect recovery, readers spread over workers with departing stalled readers, and presence cleanup")
+            # More readers than CAMPFIRE_CABLE_PASS_READERS wakes at once: the rest still follow when those it
+            # woke leave before their kick arrives, by WebSocket Close or by a dropped connection.
+            fresh.close()
+            crowd = [WebSocket(port, cookie) for _ in range(48)]
+            sockets.extend(crowd)
+            for reader in crowd:
+                assert reader.subscribe(identifier) == "confirm_subscription"
+            markers = [f"spread-{9200 + n}" for n in range(6)]
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(markers)) as pool:
+                posts = [pool.submit(request, "/rooms/1/messages", {"message[body]": marker,
+                                                                    "message[client_message_id]": marker}, cookie)
+                         for marker in markers]
+                for n, reader in enumerate(crowd[::2]):
+                    if n % 2:
+                        reader.frame(b"\x03\xe8", 0x88)
+                    else:
+                        reader.close()
+                for reader in crowd[1::2]:
+                    assert sorted(spread_markers(reader, len(markers))) == sorted(markers)
+                assert all(post.result(timeout=20)[0] == 200 for post in posts)
+            print(f"PASS: signed subscriptions, fragmented and multi-subscription delivery, unsubscribe/reuse, ordered {window_size}-publication pipelining, late enrollment, {delivery_permits} retained delivery permits, bounded rejected-write memory, {'queued' if queued_ack else 'drained'} acknowledgements, disconnect recovery, readers spread over workers with departing stalled readers, more readers than a pass wakes, and presence cleanup")
         except BaseException:
             log.seek(0)
             print(log.read(), file=sys.stderr)

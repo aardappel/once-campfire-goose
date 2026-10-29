@@ -36,6 +36,7 @@ struct Settings {
     epoll: bool = true,
     cable_window: i64 = 8,
     cable_batch: i64 = 262144,
+    cable_pass: i64 = 0,
 }
 
 var settings = Settings { .. };
@@ -296,7 +297,7 @@ thread_fn worker(cfg: http::Config) {
     reusable[] var cable_storage: u8[>..] = [];
     var cable_conns: campfire::CableLocal[>..] = [];
     var cable_targets: i32[>..] = [];
-    var cable = campfire::CableShard { window: settings.cable_window, batch: settings.cable_batch, .. };
+    var cable = campfire::CableShard { window: settings.cable_window, batch: settings.cable_batch, pass: settings.cable_pass, .. };
     let e = serve_app(cfg, Exchange { .. }) { ev, exchange, out =>
         if ev.kind == http::WORKER {
             // Publications the broker mailed the worker: its readers enroll, and wake to write.
@@ -364,7 +365,7 @@ thread_fn worker(cfg: http::Config) {
                 }
             }
             if !exchange.left && campfire::cable_owns(cable_conns,exchange.cable,exchange.cable_gen) {
-                cable_conns[exchange.cable].kicked = false;
+                campfire::cable_arrived(cable,cable_conns[exchange.cable]);
                 campfire::cable_service(cable,cable_conns,cable_targets,cable_storage,exchange.cable,out);
                 exchange.fragmented = cable_conns[exchange.cable].offset != 0;
             }
@@ -466,7 +467,14 @@ fn main() {
         settings.cable_batch=size;
     } else { settings.cable_batch=campfire::CABLE_BATCH; }
     write_stderr(str("Publication window: ",publication_window,"; delivery permits: ",delivery_permits,"\n"));
-    write_stderr(str("Cable batch: ",settings.cable_batch,"\n"));
+    // Experimental: wake at most this many cable connections per pass of a worker's loop (fanout-pass-cap).
+    var pass_text: u8[>..]=[];
+    if env("CAMPFIRE_CABLE_PASS_READERS",pass_text) {
+        let n, ok = parse_int(pass_text);
+        guard ok && n>=0 && n<=65536 else {abort("CAMPFIRE_CABLE_PASS_READERS must be from 0 through 65536");}
+        settings.cable_pass=n;
+    }
+    write_stderr(str("Cable batch: ",settings.cable_batch,"; pass readers: ",settings.cable_pass,"\n"));
     var cfg = http::Config { address: "0.0.0.0", port: 3000, workers: 4, max_conns: 1024,
         mail_size:campfire::CABLE_MAIL as i32,max_waiting:1024,.. };
     cfg.emulate_ring=backend=="emulated";

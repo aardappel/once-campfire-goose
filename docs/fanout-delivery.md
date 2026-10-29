@@ -184,6 +184,35 @@ levers left are batching per reader (writing on a worker's tick, or after its pe
 instead of on every arrival) and a bound per worker or per reader in place of the global
 window.
 
+## Pass cap (experimental, branch `fanout-pass-cap`)
+
+`CAMPFIRE_CABLE_PASS_READERS=K` (0, the default, is off) makes `cable_pump` wake at most K
+listed readers, in order, and wake the rest only once each of those K was called (by its WAKE or
+an earlier event) or left. goose-http delivers wakes asked for while it delivers others on its
+next call, and a pending wake makes the next wait a zero-timeout poll, so a worker writes K
+readers at a time and polls for posts and acknowledgements in between, instead of writing all of
+its ~667 ready readers (at 2,000) in one pass. The gate matters: every serviced reader calls
+`cable_pump`, so without it K readers would wake K each. A kick that was sent always ends in a
+call or a leave, and a live reader's own 3 s TIMEOUT calls it anyway, so the chain can't stall.
+
+M1 laptop, 2,000 saturated readers, 4 posters, queued acknowledgement, 5 rotated rounds,
+medians (ranges), all from one session:
+
+| variant | msg/s | POST p50 / p99 | saturated p99 | paced p99 | CPU per message | frames per send | `epoll_pwait`/s |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| window 8 | 267 (258–279) | 13.3 / 46.2 ms | 102 ms | 29 ms | 10.2 ms | 1.9 | 621 |
+| window 8, K 8 | 306 (293–314) | 11.2 / 49.4 ms | 124 ms | 29 ms | 8.5 ms | 3.0 | 24,289 |
+| window 8, K 16 | 300 (284–321) | 11.4 / 47.5 ms | 125 ms | 33 ms | 8.4 ms | 3.1 | 11,892 |
+| window 16, pace 20 ms | 354 (326–374) | 8.7 / 43.8 ms | 127 ms | 25 ms | 6.3 ms | 8.4 | 1,359 |
+| window 16, pace 20 ms, K 16 | 355 (338–369) | 8.8 / 45.6 ms | 142 ms | 24 ms | 6.5 ms | 8.4 | 5,336 |
+
+Two earlier sessions agree: K 16 +15% (302 vs 263 msg/s, ahead in all 5 rounds), K 32/64/128/256
++12/+12/+11/+6%. Smaller K did better each time, down to 16; K 8 ties it with twice the polls. The
+cap does what it set out to: posts are seen sooner (POST p50 −15%), readers find more
+publications pending (frames per send 1.9 → 3.1), and CPU per message falls 17%. It reaches
+only 3 frames per send, against pacing's 8, and pacing on top of it gains nothing, because pacing
+already keeps passes short. Saturated p99 rises 10–20%: a reader's frames wait for its chunk.
+
 ## Local bench pitfalls
 
 - The verifier's load generator is client-bound on arm64: its scalar `str::contains` over every

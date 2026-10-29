@@ -190,6 +190,8 @@ struct CableLocal {
     ready: bool = true,
     // Listed for a kick, or given one that has not arrived.
     kicked: bool = false,
+    // Given a kick of the current pass that has not arrived, when shard.pass caps them.
+    woken: bool = false,
     // The next publication to write, and the bytes of its current message already written.
     sequence: i64 = 0, offset: i64 = 0,
     // Publications before credited are released; those from credited to sequence wait on a drain.
@@ -214,8 +216,10 @@ struct CableShard {
     // The worker's address, which takes its publications.
     box: http::MailAddress = http::MailAddress { .. },
     entries: CableEntry[512] = [CableEntry { .. }; 512],
-    // Connections to kick, as pairs of index and generation: the first listed of kicks. It never shrinks.
-    listed: i64 = 0,
+    // The most connections one pump wakes, or 0 for all, and those it woke whose kick has not arrived.
+    pass: i64 = 0, woken: i64 = 0,
+    // Connections to kick, as pairs of index and generation: kicks[first..listed]. It never shrinks.
+    first: i64 = 0, listed: i64 = 0,
     kicks: i64[>..] = [],
 }
 
@@ -248,7 +252,7 @@ fn cable_open(shard: CableShard&, conns: CableLocal[>..]&, targets: i32[>..]&, a
     }
     shard.gens++;
     let c .= conns[index];
-    c.live = true; c.gen = shard.gens; c.address = address; c.user = user; c.ready = true; c.kicked = false;
+    c.live = true; c.gen = shard.gens; c.address = address; c.user = user; c.ready = true; c.kicked = false; c.woken = false;
     c.sequence = shard.next; c.offset = 0; c.credited = shard.next; c.mask = 0;
     shard.count++;
     if shard.count == 1 { shard.box = worker; cable_tell(CABLE_REP, worker, shard.next); }
@@ -261,6 +265,8 @@ fn cable_leave(shard: CableShard&, conns: CableLocal[>..]&, targets: i32[>..]&, 
     let w = shard.window;
     let c .= conns[index];
     c.live = false; c.mask = 0;
+    // Its kick will not arrive, so it must not hold back the next pass.
+    if c.woken { c.woken = false; shard.woken--; }
     for &target, slot in targets[index*w..(index+1)*w] {
         if target & CABLE_ENROLLED != 0 { shard.entries[slot].remaining--; }
         target = 0;
@@ -325,21 +331,37 @@ fn cable_list(shard: CableShard&, value: i64) {
     shard.listed++;
 }
 
-// Wakes each listed connection.
+// Wakes the listed connections in order. With shard.pass set, it wakes that many at most, and the rest only
+// once every one it woke was serviced or left: the loop delivers kicks asked for while it delivers others on
+// its next call, so it writes shard.pass connections at a time and polls for requests in between. A kick it
+// sent always ends in a call (the WAKE, or an earlier event) or a leave, so the next pass is never lost.
 fn cable_pump(shard: CableShard&, conns: CableLocal[>..]&, targets: i32[>..]&, storage: u8[>..]&) {
-    var k: i64 = 0;
-    while k < shard.listed {
+    guard shard.woken == 0 else { return; }
+    var k = shard.first;
+    var sent: i64 = 0;
+    while k < shard.listed && (shard.pass == 0 || sent < shard.pass) {
         let index = shard.kicks[k];
         let gen = shard.kicks[k+1];
+        k += 2;
         if cable_owns(conns, index, gen) && conns[index].kicked {
             // A live exchange always takes a wake: this one ended.
             if http::wake(conns[index].address, CABLE_KICK) != http::SENT { cable_leave(shard, conns, targets, storage, index, gen); }
+            else if shard.pass > 0 { conns[index].woken = true; shard.woken++; sent++; }
         }
-        k += 2;
     }
-    let rest = shard.listed - k;
-    for i in rest { shard.kicks[i] = shard.kicks[k+i]; }
-    shard.listed = rest;
+    shard.first = k;
+    if shard.first == shard.listed { shard.first = 0; shard.listed = 0; }
+    else if shard.first * 2 >= shard.listed {
+        let rest = shard.listed - shard.first;
+        for i in rest { shard.kicks[i] = shard.kicks[shard.first+i]; }
+        shard.first = 0; shard.listed = rest;
+    }
+}
+
+// A connection's loop called it: a kick of the current pass arrived, or no longer needs to.
+fn cable_arrived(shard: CableShard&, c: CableLocal&) {
+    c.kicked = false;
+    if c.woken { c.woken = false; shard.woken--; }
 }
 
 // Checks one connection's address per call, in turn: a connection whose exchange ended unseen leaves.

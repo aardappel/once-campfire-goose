@@ -99,3 +99,13 @@ for batch in ("8192", "16383", "49152", "2097152", "bad"):
         assert result.returncode != 0 and not database.exists(), (batch, result.stdout, result.stderr)
         assert "CAMPFIRE_CABLE_BATCH must" in result.stderr
 print("PASS: cable batch rejects invalid sizes")
+
+for readers in ("-1", "65537", "bad"):
+    with tempfile.TemporaryDirectory(prefix="campfire-invalid-pass-") as temporary:
+        database = Path(temporary) / "db.sqlite3"
+        environment = dict(os.environ, SECRET_KEY_BASE=secrets.token_hex(64), DATABASE_PATH=str(database),
+                           CAMPFIRE_HTTP_BACKEND="epoll", CAMPFIRE_CABLE_PASS_READERS=readers)
+        result = subprocess.run([str(args.binary.resolve())], env=environment, capture_output=True, text=True, timeout=5)
+        assert result.returncode != 0 and not database.exists(), (readers, result.stdout, result.stderr)
+        assert "CAMPFIRE_CABLE_PASS_READERS must" in result.stderr
+print("PASS: cable pass readers rejects invalid counts")
