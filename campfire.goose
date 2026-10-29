@@ -5,7 +5,7 @@ import cable;
 import message_actions;
 import browser_routes;
 import os;
-import http from "github.com/kaitk/goose-http@c3179b05ce13936ad2f8c713d1a670eca53e0437";
+import http from "github.com/kaitk/goose-http@ab762b121024d348d9a5f0ea480ad8145ba702a8";
 import hash from "github.com/kaitk/goose-hash@v0.0.4";
 import compress from "github.com/kaitk/goose-compress@v0.1.4";
 import sqlite from "./build/sqlite";
