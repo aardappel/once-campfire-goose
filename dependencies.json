@@ -7,8 +7,8 @@
     {
       "name": "http",
       "repository": "https://github.com/kaitk/goose-http.git",
-      "ref": "555a723adc103a455ccc4cdf43bd4a9a96608a70",
-      "revision": "555a723adc103a455ccc4cdf43bd4a9a96608a70"
+      "ref": "ab762b121024d348d9a5f0ea480ad8145ba702a8",
+      "revision": "ab762b121024d348d9a5f0ea480ad8145ba702a8"
     },
     {
       "name": "hash",

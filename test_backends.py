@@ -88,4 +88,24 @@ for policy, window in (("drained", "32"), ("queued", "0"), ("queued", "7"), ("qu
         result = subprocess.run([str(args.binary.resolve())], env=environment, capture_output=True, text=True, timeout=5)
         assert result.returncode != 0 and not database.exists(), (policy, window, result.stdout, result.stderr)
         assert "publication windows require queued" in result.stderr or "CAMPFIRE_PUBLICATION_WINDOW must" in result.stderr
-print("PASS: publication window rejects invalid capacities and requires explicit queued acknowledgement")
+print("PASS: publication window rejects invalid capacities and requires queued acknowledgement")
+
+for batch in ("8192", "16383", "49152", "2097152", "bad"):
+    with tempfile.TemporaryDirectory(prefix="campfire-invalid-batch-") as temporary:
+        database = Path(temporary) / "db.sqlite3"
+        environment = dict(os.environ, SECRET_KEY_BASE=secrets.token_hex(64), DATABASE_PATH=str(database),
+                           CAMPFIRE_HTTP_BACKEND="epoll", CAMPFIRE_CABLE_BATCH=batch)
+        result = subprocess.run([str(args.binary.resolve())], env=environment, capture_output=True, text=True, timeout=5)
+        assert result.returncode != 0 and not database.exists(), (batch, result.stdout, result.stderr)
+        assert "CAMPFIRE_CABLE_BATCH must" in result.stderr
+print("PASS: cable batch rejects invalid sizes")
+
+for readers in ("-1", "65537", "bad"):
+    with tempfile.TemporaryDirectory(prefix="campfire-invalid-pass-") as temporary:
+        database = Path(temporary) / "db.sqlite3"
+        environment = dict(os.environ, SECRET_KEY_BASE=secrets.token_hex(64), DATABASE_PATH=str(database),
+                           CAMPFIRE_HTTP_BACKEND="epoll", CAMPFIRE_CABLE_PASS_READERS=readers)
+        result = subprocess.run([str(args.binary.resolve())], env=environment, capture_output=True, text=True, timeout=5)
+        assert result.returncode != 0 and not database.exists(), (readers, result.stdout, result.stderr)
+        assert "CAMPFIRE_CABLE_PASS_READERS must" in result.stderr
+print("PASS: cable pass readers rejects invalid counts")

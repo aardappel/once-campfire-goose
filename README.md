@@ -38,6 +38,8 @@ Storage must be writable by UID 1000. An empty database is initialized from the 
 visit `/first_run` to create the account and administrator. Existing Campfire databases are preserved.
 `HTTP_PORT` defaults to 3000 in the image, `CAMPFIRE_HTTP_THREADS` to 4, and `CAMPFIRE_CACHE=0`
 disables response caching. `DATABASE_PATH` and `STORAGE_PATH` override storage locations.
+`CAMPFIRE_HTTP_MAX_CONNS` (64–65536, default 1024) sets each worker's connection limit and
+waiting cable exchanges; raise it for rooms with more than about 4,000 open WebSockets.
 `CAMPFIRE_HTTP_BACKEND` defaults to `epoll`, the direct Linux loop usable in ordinary Docker.
 `auto` probes for native io_uring and selects epoll when unavailable. `uring` requires native
 io_uring and refuses emulation; `emulated` explicitly selects the ring emulation for comparisons.
@@ -55,7 +57,15 @@ the matched comparison found no reliable fan-out improvement. The send-copy expe
 [PR #3](https://github.com/kaitk/goose-http/pull/3) was retired after review found a
 13-28% server-bound throughput loss. The current pin includes upstream's native-ring
 allocation fix, lazy WebSocket reservations, precise timers, and goose-compress v0.1.4.
-The immutable HTTP pin is v0.5.11; HTTP/3 is disabled in this application.
+HTTP/3 is disabled in this application.
+
+The pin is goose-http's experiment branch `campfire-fanout` at `ab762b12`, tagged
+`v0.5.11-campfire.3`: v0.5.11 plus refcounted shared blobs that workers send zero-copy
+(`sendmsg` on epoll and both rings; TLS and Windows copy), generation-checked blob handles,
+a fix that keeps an upgraded exchange's mailbox key live through TIMEOUT, a worker address
+with local wakes delivered right after the loop takes its mail, and an epoll loop that skips the recv after a wake when the socket is
+known to be empty. These are
+planned for a goose-http release; until then the tag keeps the pin reproducible.
 See the [dependency history](patches/README.md) and [reproducer](docs/websocket-backpressure.md).
 
 ## Verification and provenance
@@ -68,6 +78,20 @@ against current Jai. It records throughput, latency, memory, exact versions and 
 See [cache validation](docs/read-cache.md) for the read path and the historical
 [backend comparison](docs/backend-selection.md) for epoll versus ring modes.
 
+**Fan-out delivery (2026-10-28/29):** the changes are coalesced 256 KiB frames, shared bodies,
+zero-copy sends, a work-list broker, per-worker delivery and a per-pass cap on reader writes.
+Publications are now acknowledged once queued, as Jai does; `CAMPFIRE_PUBLICATION_ACK=drained`
+restores the final-drain acknowledgement. Against current Jai on a Ryzen 7 5800X3D:
+
+- **64 readers:** fan-out reaches 1.37–1.45× Jai's at about 0.6× its CPU per message.
+- **Jai's 2,000- and 10,000-client scenario:**
+  - Saturated delivery rate is 0.61× and 0.78× Jai's (0.32× and 0.31× before these defaults).
+  - Saturated delivery p99 is 67 and 248 ms, against Jai's 4.8 and 15 s.
+  - Memory is 0.05–0.06× Jai's; paced latency is on par.
+
+The [fan-out delivery report](docs/fanout-delivery.md) has each change's effect and the
+experiments that were tried and dropped. The comparison below predates these changes.
+
 On 2026-10-26 PDT, queued windows of 8, 32, 128 and 512 reach median complete fan-out
 rates of 2,031, 2,266, 2,434 and 2,322 messages/s to all 64 readers. Jai reaches 3,448.
 The 128-entry window gains 19.9% over queued-eight; Jai remains 1.42× faster. The cost
@@ -79,11 +103,10 @@ versus Jai's 316.6k and 4.41k. Anonymous memory after fan-out is 28.11 MiB versu
 for Jai. Large-message stalled-reader RSS rises from 33.49 MiB at eight to 56.36 at 128
 and 134.55 at 512; these pressure-test samples describe a different workload.
 
-All larger sizes remain opt-in: set `CAMPFIRE_PUBLICATION_ACK=queued` and
-`CAMPFIRE_PUBLICATION_WINDOW` to a power of two from 8 through 512. Total retained
+Larger sizes remain opt-in: set `CAMPFIRE_PUBLICATION_WINDOW` to a power of two from 8
+through 512 (queued acknowledgement, now the default, is required). Total retained
 delivery permits equal the window plus 56 and are released only after final drain.
-The default remains final-drain acknowledgement with eight active publications and
-64 permits. The [earlier policy-only comparison](docs/queued-acknowledgements.md)
+The default is queued acknowledgement with eight active publications and 64 permits. The [earlier policy-only comparison](docs/queued-acknowledgements.md)
 records the separate 24.2% gain from queued acknowledgements at the original bounds.
 The report preserves an unreproduced native io_uring pressure-setup failure alongside
 passing reruns; all performance measurements use epoll.

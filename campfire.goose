@@ -5,7 +5,7 @@ import cable;
 import message_actions;
 import browser_routes;
 import os;
-import http from "github.com/kaitk/goose-http@555a723adc103a455ccc4cdf43bd4a9a96608a70";
+import http from "github.com/kaitk/goose-http@ab762b121024d348d9a5f0ea480ad8145ba702a8";
 import hash from "github.com/kaitk/goose-hash@v0.0.4";
 import compress from "github.com/kaitk/goose-compress@v0.1.4";
 import sqlite from "./build/sqlite";
@@ -34,6 +34,11 @@ struct Settings {
     cache_enabled: bool = true,
     cache_diagnostics: bool = false,
     epoll: bool = true,
+    cable_window: i64 = 8,
+    cable_batch: i64 = 262144,
+    cable_pass: i64 = 0,
+    cable_pace: i64 = 0,
+    cable_pace_frames: i64 = 16,
 }
 
 var settings = Settings { .. };
@@ -45,6 +50,10 @@ struct Exchange {
     ws: http::WebSocket = http::WebSocket { .. },
     upgraded: bool = false,
     fragmented: bool = false,
+    // The worker's cable connection for this exchange, its generation, and whether it left.
+    cable: i64 = -1,
+    cable_gen: i64 = 0,
+    left: bool = false,
     user: i64 = 0,
     presence: i64[16] = [0;16],
 }
@@ -286,39 +295,59 @@ thread_fn worker(cfg: http::Config) {
     var entries: campfire::CachedPage[128] = [campfire::CachedPage { .. }; 128];
     var bytes: u8[>..] = [];
     var state = campfire::CacheState { enabled: settings.cache_enabled, diagnostics: settings.cache_diagnostics, .. };
+    // The worker's cable connections: it matches and writes the publications the broker mails it.
+    reusable[] var cable_storage: u8[>..] = [];
+    var cable_conns: campfire::CableLocal[>..] = [];
+    var cable_targets: i32[>..] = [];
+    var cable = campfire::CableShard { window: settings.cable_window, batch: settings.cable_batch,
+        pace: settings.cable_pace, pace_frames: settings.cable_pace_frames, pass: settings.cable_pass, .. };
     let e = serve_app(cfg, Exchange { .. }) { ev, exchange, out =>
-        if ev.kind == http::REQUEST && http::path_of(ev.req.target) == "/cable" {
+        if ev.kind == http::WORKER {
+            // Publications the broker mailed the worker: its readers enroll, and wake to write.
+            campfire::cable_receive(cable,cable_conns,cable_targets,ev.data);
+            campfire::cable_pump(cable,cable_conns,cable_targets,cable_storage);
+            campfire::cable_credit(cable);
+        } else if ev.kind == http::REQUEST && http::path_of(ev.req.target) == "/cable" {
             campfire::clear_cache(state);
             exchange.user = authenticate(db,ev.req,settings.cookie_key,state);
             if exchange.user == 0 || !campfire::same_origin(ev.req) { http::respond(out,403,"text/plain","Forbidden"); }
             else if http::ws_upgrade(ev.req,exchange.ws,out,"actioncable-v1-json") {
                 exchange.upgraded = true;
                 http::ws_send(out,http::WS_TEXT,"{\"type\":\"welcome\"}");
-                http::after_drain(out); http::later(out,3000);
+                http::after_drain(out);
+                exchange.cable = campfire::cable_open(cable,cable_conns,cable_targets,http::later(out,3000),http::worker_address(cfg,out),exchange.user);
+                exchange.cable_gen = cable_conns[exchange.cable].gen;
             }
         } else if exchange.upgraded {
             if ev.kind == http::WAKE {
-                exchange.fragmented = (ev.tag & 128) == 0;
-                campfire::cable_frame(out,ev.tag,ev.data); http::later(out,3000);
+                // A kick: the loop writes below.
+                http::later(out,3000);
             } else if ev.kind == http::DRAINED {
+                // Every drain covers the batch written before it.
+                if campfire::cable_owns(cable_conns,exchange.cable,exchange.cable_gen) { cable_conns[exchange.cable].ready = true; }
                 if !exchange.fragmented && exchange.commands.len>0 {
                     let end=exchange.commands.at+exchange.commands.len; var at=exchange.commands.at;
                     while at+4<=end {
                         let size=(http::gathered[at] as i64) | (http::gathered[at+1] as i64)<<8 | (http::gathered[at+2] as i64)<<16 | (http::gathered[at+3] as i64)<<24; at+=4;
                         assert(size>=0 && size<=end-at);
-                        campfire::cable_message(db,exchange.user,settings.stream_key,http::gathered[at..at+size],exchange.presence,out); at+=size;
+                        campfire::cable_message(db,exchange.user,settings.stream_key,http::gathered[at..at+size],exchange.presence,
+                            cable,cable_conns,cable_targets,cable_storage,exchange.cable,exchange.cable_gen,out); at+=size;
                     }
                     http::release_gather(exchange.commands);
                 }
-                campfire::cable_command(campfire::CABLE_CREDIT,http::later(out,3000));
+                http::later(out,3000);
             } else if ev.kind == http::TIMEOUT {
                 var now: u8[>..] = []; campfire_sql_now(now);
-                if !exchange.fragmented {http::ws_send(out,http::WS_TEXT,str("{\"type\":\"ping\",\"message\":",campfire::campfire_epoch_ms(now)/1000,"}"));}
+                // A paced connection's timer is not the keepalive: publications are flowing.
+                let paced = campfire::cable_owns(cable_conns,exchange.cable,exchange.cable_gen) && cable_conns[exchange.cable].paced;
+                if !exchange.fragmented && !paced {http::ws_send(out,http::WS_TEXT,str("{\"type\":\"ping\",\"message\":",campfire::campfire_epoch_ms(now)/1000,"}"));}
                 http::after_drain(out); http::later(out,3000);
+                campfire::cable_probe(cable,cable_conns,cable_targets,cable_storage);
             } else {
                 if ev.kind == http::CLOSED {
                     for room in exchange.presence {if room>0 {campfire::presence_change(db,exchange.user,room,2);}}
-                    http::release_gather(exchange.commands); campfire::cable_command(campfire::CABLE_LEAVE,out.stream.later);
+                    http::release_gather(exchange.commands); exchange.left = true;
+                    campfire::cable_leave(cable,cable_conns,cable_targets,cable_storage,exchange.cable,exchange.cable_gen);
                 }
                 http::ws_read(ev,exchange.ws,out) { op,data,reply =>
                     if op == http::WS_TEXT {
@@ -327,10 +356,27 @@ thread_fn worker(cfg: http::Config) {
                             if exchange.commands.most==0 {admitted=http::gather_promise(exchange.commands,65536);}
                             var length: u8[4]=[0;4]; for i in 4 {length[i]=(data.len>>(8*i)) as! u8;}
                             if !admitted || !http::gather_piece(exchange.commands,length) || !http::gather_piece(exchange.commands,data) {http::ws_close(reply,exchange.ws,1009); http::ws_end(reply,exchange.ws);}
-                        } else {campfire::cable_message(db,exchange.user,settings.stream_key,data,exchange.presence,reply);}
+                        } else {
+                            campfire::cable_message(db,exchange.user,settings.stream_key,data,exchange.presence,
+                                cable,cable_conns,cable_targets,cable_storage,exchange.cable,exchange.cable_gen,reply);
+                        }
                     }
                 };
+                // A WebSocket close ends the exchange without CLOSED.
+                if !exchange.left && exchange.ws.done {
+                    for room in exchange.presence {if room>0 {campfire::presence_change(db,exchange.user,room,2);}}
+                    http::release_gather(exchange.commands); exchange.left = true;
+                    campfire::cable_leave(cable,cable_conns,cable_targets,cable_storage,exchange.cable,exchange.cable_gen);
+                }
             }
+            if !exchange.left && campfire::cable_owns(cable_conns,exchange.cable,exchange.cable_gen) {
+                campfire::cable_arrived(cable,cable_conns[exchange.cable]);
+                let due = campfire::cable_service(cable,cable_conns,cable_targets,cable_storage,exchange.cable,out);
+                if due > 0 { http::later(out,due); }
+                exchange.fragmented = cable_conns[exchange.cable].offset != 0;
+            }
+            campfire::cable_pump(cable,cable_conns,cable_targets,cable_storage);
+            campfire::cable_credit(cable);
         } else if ev.kind == http::WAKE && ev.tag == campfire::CABLE_ACK {
             out.buf.append(http::gathered[exchange.response.at..exchange.response.at+exchange.response.len]);
             http::release_gather(exchange.response);
@@ -406,7 +452,7 @@ fn main() {
         guard publication_ack=="drained" || publication_ack=="queued"
             else {abort("CAMPFIRE_PUBLICATION_ACK must be drained or queued");}
     }
-    let queued_ack = publication_ack=="queued";
+    let queued_ack = publication_ack!="drained";
     var publication_window: i64 = campfire::CABLE_WINDOW;
     var window_text: u8[>..]=[];
     if env("CAMPFIRE_PUBLICATION_WINDOW",window_text) {
@@ -417,10 +463,39 @@ fn main() {
         publication_window=size;
     }
     let delivery_permits=publication_window+56;
+    settings.cable_window=publication_window;
     write_stderr(str("Publication acknowledgement: ",if queued_ack {"queued"} else {"drained"},"\n"));
+    var batch_text: u8[>..]=[];
+    if env("CAMPFIRE_CABLE_BATCH",batch_text) {
+        let size, ok = parse_int(batch_text);
+        guard ok && size>=16384 && size<=1048576 && (size & (size-1))==0
+            else {abort("CAMPFIRE_CABLE_BATCH must be a power of two from 16384 through 1048576");}
+        settings.cable_batch=size;
+    } else { settings.cable_batch=campfire::CABLE_BATCH; }
+    // Experimental: pace each cable connection's writes under load (fanout-pace).
+    var pace_text: u8[>..]=[];
+    if env("CAMPFIRE_CABLE_PACE_MS",pace_text) {
+        let ms, ok = parse_int(pace_text);
+        guard ok && ms>=0 && ms<=1000 else {abort("CAMPFIRE_CABLE_PACE_MS must be from 0 through 1000");}
+        settings.cable_pace=ms;
+    }
+    var pace_frames_text: u8[>..]=[];
+    if env("CAMPFIRE_CABLE_PACE_FRAMES",pace_frames_text) {
+        let n, ok = parse_int(pace_frames_text);
+        guard ok && n>=1 && n<=512 else {abort("CAMPFIRE_CABLE_PACE_FRAMES must be from 1 through 512");}
+        settings.cable_pace_frames=n;
+    }
     write_stderr(str("Publication window: ",publication_window,"; delivery permits: ",delivery_permits,"\n"));
+    // Wake at most this many cable connections per pass of a worker's loop; 0 wakes every ready one.
+    var pass_text: u8[>..]=[];
+    if env("CAMPFIRE_CABLE_PASS_READERS",pass_text) {
+        let n, ok = parse_int(pass_text);
+        guard ok && n>=0 && n<=65536 else {abort("CAMPFIRE_CABLE_PASS_READERS must be from 0 through 65536");}
+        settings.cable_pass=n;
+    } else { settings.cable_pass=campfire::CABLE_PASS; }
+    write_stderr(str("Cable batch: ",settings.cable_batch,"; pass readers: ",settings.cable_pass,"; pace: ",settings.cable_pace," ms, ",settings.cable_pace_frames," frames\n"));
     var cfg = http::Config { address: "0.0.0.0", port: 3000, workers: 4, max_conns: 1024,
-        mail_slots:128,mail_size:8192,max_waiting:1024,.. };
+        mail_size:campfire::CABLE_MAIL as i32,max_waiting:1024,.. };
     cfg.emulate_ring=backend=="emulated";
     cfg.require_ring=!settings.epoll && !cfg.emulate_ring;
     write_stderr(str("HTTP backend: ", if settings.epoll {"epoll"} else if cfg.emulate_ring {"emulated"} else {"io_uring"}, "\n"));
@@ -436,6 +511,17 @@ fn main() {
         guard ok && workers > 0 && workers <= 256 else { abort("invalid CAMPFIRE_HTTP_THREADS"); }
         cfg.workers = workers;
     }
+    var conns_text: u8[>..] = [];
+    // Each worker's connections, and as many waiting cable exchanges.
+    if env("CAMPFIRE_HTTP_MAX_CONNS", conns_text) {
+        let conns, ok = parse_int(conns_text);
+        guard ok && conns >= 64 && conns <= 65536 else { abort("invalid CAMPFIRE_HTTP_MAX_CONNS"); }
+        cfg.max_conns = conns; cfg.max_waiting = conns;
+    }
+    // A box takes the publication mails and the acknowledgements outstanding; kicks take no slot.
+    var slots: i64 = 2;
+    while slots < 4*publication_window + 256 { slots *= 2; }
+    cfg.mail_slots = slots as i32;
     campfire::initialize_database(settings.database);
     qlimit<campfire::Publication>(delivery_permits); qlimit<campfire::CablePermit>(delivery_permits); qlimit<campfire::CableCommand>(65536);
     for i in delivery_permits { qput(campfire::CablePermit { .. }); }

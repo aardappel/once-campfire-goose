@@ -18,8 +18,8 @@ if [ "${1:-}" != "--build-only" ]; then
     for backend in auto epoll emulated; do
         CAMPFIRE_HTTP_BACKEND="$backend" python3 test_cable.py build/campfire
         CAMPFIRE_HTTP_BACKEND="$backend" python3 test_cable.py build/campfire --batch-pressure
-        CAMPFIRE_PUBLICATION_ACK=queued CAMPFIRE_HTTP_BACKEND="$backend" python3 test_cable.py build/campfire
-        CAMPFIRE_PUBLICATION_ACK=queued CAMPFIRE_HTTP_BACKEND="$backend" python3 test_cable.py build/campfire --batch-pressure
+        CAMPFIRE_PUBLICATION_ACK=drained CAMPFIRE_HTTP_BACKEND="$backend" python3 test_cable.py build/campfire
+        CAMPFIRE_PUBLICATION_ACK=drained CAMPFIRE_HTTP_BACKEND="$backend" python3 test_cable.py build/campfire --batch-pressure
         CAMPFIRE_HTTP_BACKEND="$backend" python3 test_server.py build/campfire
         CAMPFIRE_HTTP_BACKEND="$backend" python3 test_server.py build/campfire --no-cache
     done
@@ -28,6 +28,17 @@ if [ "${1:-}" != "--build-only" ]; then
         CAMPFIRE_PUBLICATION_ACK=queued CAMPFIRE_PUBLICATION_WINDOW="$window" CAMPFIRE_HTTP_BACKEND=epoll python3 test_cable.py build/campfire --batch-pressure
     done
     CAMPFIRE_PUBLICATION_ACK=queued CAMPFIRE_PUBLICATION_WINDOW=512 CAMPFIRE_HTTP_BACKEND=emulated python3 test_cable.py build/campfire --batch-pressure
+    CAMPFIRE_PUBLICATION_ACK=queued CAMPFIRE_PUBLICATION_WINDOW=128 CAMPFIRE_CABLE_PACE_MS=20 CAMPFIRE_HTTP_BACKEND=epoll python3 test_cable.py build/campfire
+    CAMPFIRE_PUBLICATION_ACK=queued CAMPFIRE_PUBLICATION_WINDOW=128 CAMPFIRE_CABLE_PACE_MS=20 CAMPFIRE_HTTP_BACKEND=epoll python3 test_cable.py build/campfire --batch-pressure
+    for batch in 16384 32768 1048576; do
+        CAMPFIRE_CABLE_BATCH="$batch" CAMPFIRE_HTTP_BACKEND=epoll python3 test_cable.py build/campfire
+        CAMPFIRE_PUBLICATION_ACK=queued CAMPFIRE_CABLE_BATCH="$batch" CAMPFIRE_HTTP_BACKEND=epoll python3 test_cable.py build/campfire --batch-pressure
+    done
+    for readers in 0 1 4; do
+        CAMPFIRE_CABLE_PASS_READERS="$readers" CAMPFIRE_HTTP_BACKEND=epoll python3 test_cable.py build/campfire
+        CAMPFIRE_PUBLICATION_ACK=queued CAMPFIRE_CABLE_PASS_READERS="$readers" CAMPFIRE_HTTP_BACKEND=epoll python3 test_cable.py build/campfire --batch-pressure
+    done
+    CAMPFIRE_PUBLICATION_ACK=queued CAMPFIRE_CABLE_PASS_READERS=1 CAMPFIRE_HTTP_BACKEND=emulated python3 test_cable.py build/campfire
     for test in cache auth render; do
         "$compiler" build --offline --cc clang -o "build/${test}_test" "${test}_test.goose"
         "build/${test}_test"

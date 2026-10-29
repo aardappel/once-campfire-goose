@@ -46,8 +46,8 @@ is supported separately by the admission/slow-reader tests described below.
 
 `CAMPFIRE_PUBLICATION_ACK=queued` releases the HTTP response after the database
 commit and after the broker retains the publication payload and snapshots its
-matching subscribers. The default, `drained`, waits for those readers' final
-socket drains. The broker issues acknowledgements in publication order in both modes.
+matching subscribers; it is the default since the fan-out work (2026-10-29). `drained`
+waits for those readers' final socket drains. The broker issues acknowledgements in publication order in both modes.
 
 Queued success promises committed, queued delivery, not completed socket delivery.
 Disconnects cancel only the disconnected reader's work. Disconnecting the HTTP
