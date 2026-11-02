@@ -89,6 +89,11 @@ restores the final-drain acknowledgement. Against current Jai on a Ryzen 7 5800X
   - Saturated delivery p99 is 67 and 248 ms, against Jai's 4.8 and 15 s.
   - Memory is 0.05–0.06× Jai's; paced latency is on par.
 
+An independent run on a second desktop reproduced 1.46× Jai at 64 readers, 0.56× and 0.59×
+at 2,000 and 10,000 clients, saturated p99 of 80–635 ms against Jai's 5.8–7.3 s, and 16–39 MiB
+against 327–509 MiB. The experiment is concluded; saturated throughput at large fan-out is the
+open gap.
+
 The [fan-out delivery report](docs/fanout-delivery.md) has each change's effect and the
 experiments that were tried and dropped. The comparison below predates these changes.
 

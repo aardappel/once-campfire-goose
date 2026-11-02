@@ -45,8 +45,8 @@ one reference to it, at that worker's own goose-http mail address, so its
 work per publication grows with the number of workers, not readers. Each worker owns its
 connections' subscriptions and delivery state. It snapshots its matching subscriptions when
 a publication reaches it, so subscriptions added later do not inherit it, and wakes each
-ready reader with a local wake that takes no mailbox slot. Each reader writes at most one 32 KiB
-batch of whole frames per goose-http drain credit, from the shared body, and completes its
+ready reader with a local wake that takes no mailbox slot. Each reader writes at most one 256 KiB
+batch (`CAMPFIRE_CABLE_BATCH`) of whole frames per goose-http drain credit, from the shared body, and completes its
 publications in order; only a larger message is fragmented. An unsubscribe cancels unsent
 deliveries; an already-started WebSocket message finishes before its identifier can be reused.
 Client commands received between fragments wait in a bounded 64 KiB buffer.
@@ -54,9 +54,10 @@ Each connection keeps at most 16 subscriptions. A worker credits the broker once
 enrolled readers drained a publication or left. A worker without connections is credited
 at once and skipped; when it has connections again, it is enrolled in later publications. Disconnected readers, including those that end
 with a WebSocket Close, are removed, and each worker checks its readers' addresses in turn.
-A message POST is acknowledged only after its transaction
-commits and every enrolled subscriber's batches have reached their socket, or the subscriber
-disconnects. Socket acceptance does not prove that a browser has processed the message.
+By default a message POST is acknowledged once its transaction commits and the broker has
+retained the publication and snapshotted its subscribers. With `CAMPFIRE_PUBLICATION_ACK=drained`
+it is acknowledged only after every enrolled subscriber's batches have reached their socket, or
+the subscriber disconnects. Socket acceptance does not prove that a browser has processed the message.
 
 A stalled subscriber holds retirement of its publication and all later acknowledgements.
 Other readers can advance within the eight-publication window; the broker admits another
